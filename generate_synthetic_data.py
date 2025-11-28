@@ -550,11 +550,17 @@ class FastSyntheticGenerator:
                     if pk_col in pk_fk_columns and pk_col not in composite_columns_all:
                         pk_cols_that_are_single_fks.add(pk_col)
                 
+                # Debug output for PK column classification
+                debug_print("{0}: PK columns: {1}".format(node, tmeta.pk_columns))
+                debug_print("{0}: PK-FK columns: {1}".format(node, pk_fk_columns))
+                debug_print("{0}: Composite FK columns: {1}".format(node, composite_columns_all))
+                debug_print("{0}: Single-column FK-PK columns: {1}".format(node, pk_cols_that_are_single_fks))
+                
                 # Generate Cartesian product if at least 2 PK columns are single-column FKs
                 # This enables optimization even when some PK columns are in composite FKs
                 if len(pk_cols_that_are_single_fks) >= 2:
                     # At least 2 PK columns are single-column FKs - generate Cartesian product for those
-                    debug_print("{0}: {1} of {2} PK columns are single-column FKs - generating Cartesian product".format(
+                    debug_print("{0}: {1} of {2} PK columns are single-column FKs - attempting Cartesian product".format(
                         node, len(pk_cols_that_are_single_fks), len(tmeta.pk_columns)))
                     
                     # Build ordered list of single-column FK-PK columns (preserving PK column order)
@@ -566,8 +572,14 @@ class FastSyntheticGenerator:
                     for pk_col in ordered_single_fk_pk_cols:
                         parent_vals = parent_caches.get(pk_col, [])
                         unique_vals = list(set(parent_vals))
+                        
+                        debug_print("{0}: PK-FK column {1} has {2} parent values, {3} unique".format(
+                            node, pk_col, len(parent_vals), len(unique_vals)))
+                        
                         if not unique_vals:
                             print("WARNING: {0}: No parent values available for PK-FK column {1}".format(node, pk_col), file=sys.stderr)
+                            print("  Parent cache keys: {0}".format(list(parent_caches.keys())), file=sys.stderr)
+                            print("  This PK-FK column will prevent Cartesian product generation".format(), file=sys.stderr)
                             pk_value_pools = []
                             break
                         pk_value_pools.append(unique_vals)
@@ -635,6 +647,15 @@ class FastSyntheticGenerator:
                         pre_allocated_pk_cols = ordered_single_fk_pk_cols
                         debug_print("{0}: Pre-allocated {1} unique PK tuples for columns {2}".format(
                             node, len(pre_allocated_pk_tuples), pre_allocated_pk_cols))
+                    else:
+                        # pk_value_pools is empty - parent values missing
+                        debug_print("{0}: Cannot generate Cartesian product - missing parent values for some PK-FK columns".format(node))
+                        debug_print("{0}: All FK columns: {1}".format(node, all_fk_columns))
+                        debug_print("{0}: Parent caches available for: {1}".format(node, list(parent_caches.keys())))
+                else:
+                    # Not enough single-column FK-PK columns for Cartesian product
+                    debug_print("{0}: Only {1} PK column(s) are single-column FKs (need >=2 for Cartesian product)".format(
+                        node, len(pk_cols_that_are_single_fks)))
         
         filtered_parent_caches = {}
         for comp in composite_cfgs:
