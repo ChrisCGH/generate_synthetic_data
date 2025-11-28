@@ -568,13 +568,32 @@ class FastSyntheticGenerator:
                 else:
                     filtered_parent_caches[comp['constraint_name']] = parent_rows
         
+        # Detect composite FKs that overlap with composite PKs (requires uniqueness tracking)
+        composite_pk_fk_overlap = {}
+        for comp in composite_cfgs:
+            fk_child_cols = set(comp["child_columns"])
+            pk_cols = set(tmeta.pk_columns)
+            overlap = fk_child_cols & pk_cols
+            if overlap and len(tmeta.pk_columns) > 1:
+                # This composite FK overlaps with a multi-column PK
+                composite_pk_fk_overlap[comp['constraint_name']] = {
+                    'fk_cols': comp["child_columns"],
+                    'pk_cols': tmeta.pk_columns,
+                    'overlap': overlap
+                }
+        
+        # Track used PK combinations for composite PK uniqueness
+        used_composite_pk_combos = set()
+        
         resolved_rows = []
+        skipped_rows = 0
         
         for row_idx, row in enumerate(rows):
             if not row:
                 continue
             
             temp_row = dict(row)
+            row_skipped = False
             
             for comp in composite_cfgs:
                 fk_child_cols = comp["child_columns"]
@@ -613,10 +632,46 @@ class FastSyntheticGenerator:
                         parent_row = self.rng.choice(matching_parent_rows)
                         for child_col, parent_col in zip(fk_child_cols, parent_cols):
                             temp_row[child_col] = parent_row.get(parent_col)
+                elif comp['constraint_name'] in composite_pk_fk_overlap:
+                    # This composite FK overlaps with composite PK - need to ensure uniqueness
+                    pk_cols = tmeta.pk_columns
+                    
+                    # Shuffle parent rows to get random selection
+                    shuffled_parents = list(valid_parent_rows)
+                    self.rng.shuffle(shuffled_parents)
+                    
+                    found_valid_parent = False
+                    for parent_row in shuffled_parents:
+                        if not parent_row:
+                            continue
+                        
+                        # Simulate assignment and check PK uniqueness
+                        test_row = dict(temp_row)
+                        for child_col, parent_col in zip(fk_child_cols, parent_cols):
+                            test_row[child_col] = parent_row.get(parent_col)
+                        
+                        pk_tuple = tuple(test_row.get(col) for col in pk_cols)
+                        
+                        if pk_tuple not in used_composite_pk_combos:
+                            # This parent maintains PK uniqueness - use it
+                            for child_col, parent_col in zip(fk_child_cols, parent_cols):
+                                temp_row[child_col] = parent_row.get(parent_col)
+                            used_composite_pk_combos.add(pk_tuple)
+                            found_valid_parent = True
+                            break
+                    
+                    if not found_valid_parent:
+                        # No parent row found that maintains uniqueness
+                        row_skipped = True
+                        skipped_rows += 1
+                        break
                 else:
-                    parent_row = self.rng. choice(valid_parent_rows)
+                    parent_row = self.rng.choice(valid_parent_rows)
                     for child_col, parent_col in zip(fk_child_cols, parent_cols):
                         temp_row[child_col] = parent_row.get(parent_col)
+            
+            if row_skipped:
+                continue
             
             for fk in self.fks:
                 if "{0}.{1}".format(fk.table_schema, fk.table_name) != node:
@@ -637,6 +692,10 @@ class FastSyntheticGenerator:
                         temp_row[fk_col] = self.rng.choice(parent_vals) if parent_vals else None
             
             resolved_rows.append(temp_row)
+        
+        if skipped_rows > 0:
+            print("WARNING: {0}: Skipped {1} rows due to insufficient unique parent combinations for composite PK-FK".format(
+                node, skipped_rows), file=sys.stderr)
         
         return resolved_rows
     
