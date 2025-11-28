@@ -522,7 +522,8 @@ class FastSyntheticGenerator:
         # Pre-allocated PK tuples for composite PK with single-column FKs
         pre_allocated_pk_tuples = None
         pre_allocated_pk = None
-        # Track which PK columns have pre-allocated values (for partial tuple assignment)
+        # Track which single-column FK-PK columns have pre-allocated values
+        # (for partial tuple assignment when some PK columns are in composite FKs)
         pre_allocated_pk_cols = None
         
         if pk_fk_columns:
@@ -691,8 +692,9 @@ class FastSyntheticGenerator:
             temp_row = dict(row)
             row_skipped = False
             
-            # If we have pre-allocated PK tuples (composite PK with single-column FKs),
-            # assign them first to guarantee uniqueness for those specific PK columns
+            # If we have pre-allocated PK tuples (at least 2 single-column FK-PK columns),
+            # assign them first to guarantee partial PK uniqueness.
+            # Remaining PK columns (in composite FKs) will be assigned by composite FK resolution.
             if pre_allocated_pk_tuples and row_idx < len(pre_allocated_pk_tuples):
                 pk_tuple = pre_allocated_pk_tuples[row_idx]
                 # Use pre_allocated_pk_cols which contains only the single-column FK-PK columns
