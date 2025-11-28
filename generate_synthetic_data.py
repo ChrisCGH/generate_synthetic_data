@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Highly optimized standalone version"""
 import argparse, json, sys, random, threading, re
+import itertools
 from collections import defaultdict, deque
 from getpass import getpass
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -518,10 +519,15 @@ class FastSyntheticGenerator:
             if parent_table in self.generated_rows and parent_table not in parent_row_caches:
                 parent_row_caches[parent_table] = self.generated_rows[parent_table]
         
+        # Pre-allocated PK tuples for composite PK with single-column FKs
+        pre_allocated_pk_tuples = None
+        pre_allocated_pk = None
+        
         if pk_fk_columns:
             debug_print("{0}: PK columns {1} are also FK columns - pre-allocating values".format(node, pk_fk_columns))
             
             if len(tmeta.pk_columns) == 1 and tmeta.pk_columns[0] in pk_fk_columns:
+                # Single-column PK that is also an FK - existing logic
                 pk_col = tmeta.pk_columns[0]
                 parent_vals = parent_caches.get(pk_col, [])
                 unique_parent_vals = list(set(parent_vals))
@@ -534,10 +540,89 @@ class FastSyntheticGenerator:
                 
                 self.rng.shuffle(unique_parent_vals)
                 pre_allocated_pk = unique_parent_vals[:len(rows)]
-            else:
-                pre_allocated_pk = None
-        else:
-            pre_allocated_pk = None
+            elif len(tmeta.pk_columns) > 1:
+                # Multi-column PK - check if all PK columns are single-column FKs (not composite FKs)
+                pk_cols_that_are_single_fks = set()
+                for pk_col in tmeta.pk_columns:
+                    if pk_col in pk_fk_columns and pk_col not in composite_columns_all:
+                        pk_cols_that_are_single_fks.add(pk_col)
+                
+                if pk_cols_that_are_single_fks == set(tmeta.pk_columns):
+                    # All PK columns are single-column FKs - generate Cartesian product
+                    debug_print("{0}: All PK columns are single-column FKs - generating Cartesian product".format(node))
+                    
+                    # Build pools of unique FK values for each PK column
+                    pk_value_pools = []
+                    pool_sizes = []
+                    for pk_col in tmeta.pk_columns:
+                        parent_vals = parent_caches.get(pk_col, [])
+                        unique_vals = list(set(parent_vals))
+                        if not unique_vals:
+                            print("WARNING: {0}: No parent values available for PK-FK column {1}".format(node, pk_col), file=sys.stderr)
+                            pk_value_pools = []
+                            break
+                        pk_value_pools.append(unique_vals)
+                        pool_sizes.append(len(unique_vals))
+                    
+                    if pk_value_pools:
+                        # Calculate maximum possible combinations
+                        max_combinations = 1
+                        for size in pool_sizes:
+                            max_combinations *= size
+                        
+                        debug_print("{0}: FK value pools: {1}, max combinations: {2}".format(
+                            node, 
+                            dict(zip(tmeta.pk_columns, pool_sizes)),
+                            max_combinations))
+                        
+                        needed_rows = len(rows)
+                        if max_combinations < needed_rows:
+                            print("WARNING: {0} needs {1} rows but only {2} unique PK combinations available from FK values".format(
+                                node, needed_rows, max_combinations), file=sys.stderr)
+                            print("  FK column pool sizes: {0}".format(dict(zip(tmeta.pk_columns, pool_sizes))), file=sys.stderr)
+                            print("  Truncating to {0} rows".format(max_combinations), file=sys.stderr)
+                            rows = rows[:max_combinations]
+                            needed_rows = max_combinations
+                        
+                        # Optimize: if we need fewer rows than total combinations, 
+                        # generate randomly instead of full Cartesian product
+                        if needed_rows < max_combinations and max_combinations > 100000:
+                            # For large pools, sample randomly to avoid memory issues
+                            debug_print("{0}: Using random sampling ({1} of {2} combinations)".format(
+                                node, needed_rows, max_combinations))
+                            
+                            used_combos = set()
+                            pre_allocated_pk_tuples = []
+                            
+                            # Shuffle pools for randomness
+                            for pool in pk_value_pools:
+                                self.rng.shuffle(pool)
+                            
+                            max_attempts = needed_rows * 10
+                            attempts = 0
+                            while len(pre_allocated_pk_tuples) < needed_rows and attempts < max_attempts:
+                                combo = tuple(self.rng.choice(pool) for pool in pk_value_pools)
+                                if combo not in used_combos:
+                                    used_combos.add(combo)
+                                    pre_allocated_pk_tuples.append(combo)
+                                attempts += 1
+                            
+                            if len(pre_allocated_pk_tuples) < needed_rows:
+                                # Fallback: generate all combinations if random sampling failed
+                                debug_print("{0}: Random sampling got {1}, falling back to full generation".format(
+                                    node, len(pre_allocated_pk_tuples)))
+                                all_combinations = list(itertools.product(*pk_value_pools))
+                                self.rng.shuffle(all_combinations)
+                                pre_allocated_pk_tuples = all_combinations[:needed_rows]
+                        else:
+                            # Generate all combinations using Cartesian product
+                            all_combinations = list(itertools.product(*pk_value_pools))
+                            self.rng.shuffle(all_combinations)
+                            
+                            # Take only as many as we need
+                            pre_allocated_pk_tuples = all_combinations[:needed_rows]
+                        
+                        debug_print("{0}: Pre-allocated {1} unique PK tuples".format(node, len(pre_allocated_pk_tuples)))
         
         filtered_parent_caches = {}
         for comp in composite_cfgs:
@@ -594,6 +679,13 @@ class FastSyntheticGenerator:
             
             temp_row = dict(row)
             row_skipped = False
+            
+            # If we have pre-allocated PK tuples (composite PK with all single-column FKs),
+            # assign them first to guarantee uniqueness
+            if pre_allocated_pk_tuples and row_idx < len(pre_allocated_pk_tuples):
+                pk_tuple = pre_allocated_pk_tuples[row_idx]
+                for col_idx, pk_col in enumerate(tmeta.pk_columns):
+                    temp_row[pk_col] = pk_tuple[col_idx]
             
             for comp in composite_cfgs:
                 fk_child_cols = comp["child_columns"]
@@ -681,6 +773,10 @@ class FastSyntheticGenerator:
                 if fk_col in composite_columns_all:
                     continue
                 if cfg and any(sf["column"] == fk_col for sf in cfg.get("static_fks", [])):
+                    continue
+                
+                # Skip if this FK column was already assigned via pre_allocated_pk_tuples
+                if pre_allocated_pk_tuples and fk_col in pk_fk_columns:
                     continue
                 
                 col_meta = next((c for c in tmeta.columns if c. name == fk_col), None)
