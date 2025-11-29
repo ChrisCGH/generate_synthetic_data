@@ -617,6 +617,7 @@ class FastSyntheticGenerator:
                                     enum_validators[parent_col] = valid_values
                             
                             # Filter parent rows by enum constraints before extracting combinations
+                            # Note: Rows with NULL values in enum columns are excluded since NULL is not a valid enum value
                             if enum_validators:
                                 original_count = len(parent_rows)
                                 valid_parent_rows = []
