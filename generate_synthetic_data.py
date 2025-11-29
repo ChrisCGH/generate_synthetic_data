@@ -607,6 +607,26 @@ class FastSyntheticGenerator:
                             parent_table = "{0}.{1}".format(comp['referenced_table_schema'], comp['referenced_table_name'])
                             parent_rows = parent_row_caches.get(parent_table, [])
                             
+                            # Build enum validators for child columns to filter parent rows
+                            enum_validators = {}
+                            for child_col, parent_col in zip(comp["child_columns"], comp["referenced_columns"]):
+                                child_col_meta = next((c for c in tmeta.columns if c.name == child_col), None)
+                                if child_col_meta and child_col_meta.data_type and child_col_meta.data_type.lower() == "enum":
+                                    m = re.findall(r"'((?:[^']|(?:''))*)'", child_col_meta.column_type or "")
+                                    valid_values = set([v.replace("''", "'") for v in m])
+                                    enum_validators[parent_col] = valid_values
+                            
+                            # Filter parent rows by enum constraints before extracting combinations
+                            if enum_validators:
+                                original_count = len(parent_rows)
+                                valid_parent_rows = []
+                                for pr in parent_rows:
+                                    if pr and all(pr.get(pcol) in valid_vals for pcol, valid_vals in enum_validators.items()):
+                                        valid_parent_rows.append(pr)
+                                parent_rows = valid_parent_rows
+                                debug_print("{0}: Filtered parent rows from {1} to {2} based on enum constraints".format(
+                                    node, original_count, len(parent_rows)))
+                            
                             # Get PK columns that are in this composite FK (preserving PK column order)
                             pk_cols_in_this_fk = [col for col in tmeta.pk_columns if col in comp["child_columns"]]
                             # Map child columns to parent columns
@@ -616,7 +636,7 @@ class FastSyntheticGenerator:
                             debug_print("{0}: Composite FK {1} maps PK columns {2} to parent columns {3}".format(
                                 node, comp['constraint_name'], pk_cols_in_this_fk, parent_cols_for_pk))
                             
-                            # Extract unique combinations from parent rows
+                            # Extract unique combinations from FILTERED parent rows
                             unique_combos = set()
                             for parent_row in parent_rows:
                                 if parent_row:
@@ -862,6 +882,9 @@ class FastSyntheticGenerator:
         # Track used PK combinations for composite PK uniqueness
         used_composite_pk_combos = set()
         
+        # Track which composite FKs have been skipped (for logging purposes)
+        logged_skipped_fks = set()
+        
         resolved_rows = []
         skipped_rows = 0
         
@@ -909,8 +932,10 @@ class FastSyntheticGenerator:
                     fk_pk_overlap = set(fk_child_cols) & set(tmeta.pk_columns)
                     pre_assigned_set = set(pre_allocated_pk_cols)
                     if fk_pk_overlap and fk_pk_overlap.issubset(pre_assigned_set):
-                        debug_print("{0}: Skipping composite FK {1} - PK columns {2} already pre-assigned".format(
-                            node, comp['constraint_name'], fk_pk_overlap))
+                        if comp['constraint_name'] not in logged_skipped_fks:
+                            debug_print("{0}: Skipping composite FK {1} - PK columns {2} already pre-assigned via hybrid Cartesian product".format(
+                                node, comp['constraint_name'], fk_pk_overlap))
+                            logged_skipped_fks.add(comp['constraint_name'])
                         continue
                 
                 has_pk_fk = any(child_col in pk_fk_columns for child_col in fk_child_cols)
