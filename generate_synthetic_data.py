@@ -300,6 +300,57 @@ class FastSyntheticGenerator:
                 print("  - {0}.{1} -> {2} ({3})".format(child, col, parent, fk_type), file=sys.stderr)
             sys.exit(1)
     
+    def validate_conditional_fks(self):
+        """Validate that discriminator columns exist in tables with conditional FKs"""
+        errors = []
+        for fk in self.fks:
+            if not fk.condition:
+                continue
+            
+            parsed = parse_fk_condition(fk.condition)
+            if not parsed:
+                errors.append("{0}.{1}: Invalid condition syntax: {2}".format(
+                    fk.table_schema, fk.table_name, fk.condition))
+                continue
+            
+            discriminator_col = parsed['column']
+            table_key = "{0}.{1}".format(fk.table_schema, fk.table_name)
+            tmeta = self.metadata.get(table_key)
+            
+            if tmeta:
+                col_names = [c.name for c in tmeta.columns]
+                if discriminator_col not in col_names:
+                    errors.append("{0}: Discriminator column '{1}' in condition '{2}' not found in table. Available columns: {3}".format(
+                        table_key, discriminator_col, fk.condition, ', '.join(col_names)))
+        
+        # Also validate composite FK conditions
+        for comp in self.logical_composite_fks:
+            condition = comp.get('condition')
+            if not condition:
+                continue
+            
+            parsed = parse_fk_condition(condition)
+            if not parsed:
+                errors.append("{0}.{1}: Invalid condition syntax in composite FK: {2}".format(
+                    comp['table_schema'], comp['table_name'], condition))
+                continue
+            
+            discriminator_col = parsed['column']
+            table_key = "{0}.{1}".format(comp['table_schema'], comp['table_name'])
+            tmeta = self.metadata.get(table_key)
+            
+            if tmeta:
+                col_names = [c.name for c in tmeta.columns]
+                if discriminator_col not in col_names:
+                    errors.append("{0}: Discriminator column '{1}' in composite FK condition '{2}' not found in table. Available columns: {3}".format(
+                        table_key, discriminator_col, condition, ', '.join(col_names)))
+        
+        if errors:
+            print("Error: Conditional FK validation failed:", file=sys.stderr)
+            for err in errors:
+                print("  - {0}".format(err), file=sys.stderr)
+            sys.exit(1)
+    
     def generate_batch_fast(self, node, start_idx, end_idx, thread_rng, tmeta, cfg):
         """Generate a batch of rows with guaranteed unique values"""
         rows = []
@@ -1112,6 +1163,7 @@ class FastSyntheticGenerator:
         self.detect_forced_explicit_parents()
         self.prepare_pk_sequences()
         self.validate_not_null_fks()
+        self.validate_conditional_fks()
         
         nodes, edges = build_dependency_graph(self.config, self.fks, self.logical_composite_fks)
         order = topo_sort(nodes, edges)
