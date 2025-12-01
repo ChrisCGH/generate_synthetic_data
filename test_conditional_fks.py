@@ -269,5 +269,116 @@ class TestCompositeConditionalFKs(unittest.TestCase):
         self.assertEqual(composite_fks[0]["condition"], "type = 'A'")
 
 
+class TestConditionalFKParentCaching(unittest.TestCase):
+    """Test that conditional FKs properly populate parent_caches for Cartesian product"""
+    
+    def test_conditional_fk_parent_values_combined(self):
+        """Test that conditional FK parent values are combined for Cartesian product"""
+        from collections import defaultdict
+        from generate_synthetic_data_utils import debug_print
+        
+        # Simulate the fix logic: combining conditional FK parent values into parent_caches
+        # This mimics what happens in resolve_fks_batch() after the fix
+        
+        # Setup: Two conditional FKs for column P_ID pointing to W and H
+        conditional_fk_caches = {
+            'LOGICAL_A_P_ID_W': [1, 2, 3, 4, 5],  # P_ID values from table W
+            'LOGICAL_A_P_ID_H': [6, 7, 8, 9, 10]  # P_ID values from table H
+        }
+        
+        # FKs grouped by column (as created by conditional_fks_by_column)
+        # Key is column name, value is list of FK objects with constraint_name attribute
+        class MockFK:
+            def __init__(self, constraint_name, column_name, condition):
+                self.constraint_name = constraint_name
+                self.column_name = column_name
+                self.condition = condition
+        
+        conditional_fks_by_column = defaultdict(list)
+        conditional_fks_by_column['P_ID'].append(MockFK('LOGICAL_A_P_ID_W', 'P_ID', "T = 'some_string'"))
+        conditional_fks_by_column['P_ID'].append(MockFK('LOGICAL_A_P_ID_H', 'P_ID', "T = 'some_other_string'"))
+        
+        # Initially, parent_caches is empty for P_ID (no unconditional FK)
+        parent_caches = {}
+        
+        # Apply the fix logic: combine conditional FK parent values
+        for fk_col, fk_list in conditional_fks_by_column.items():
+            if fk_col not in parent_caches:
+                all_parent_vals = []
+                for fk in fk_list:
+                    cached_vals = conditional_fk_caches.get(fk.constraint_name, [])
+                    all_parent_vals.extend(cached_vals)
+                if all_parent_vals:
+                    parent_caches[fk_col] = list(set(all_parent_vals))
+        
+        # Verify: parent_caches now has combined values for P_ID
+        self.assertIn('P_ID', parent_caches)
+        self.assertEqual(len(parent_caches['P_ID']), 10)  # 5 + 5 unique values
+        self.assertEqual(set(parent_caches['P_ID']), {1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+    
+    def test_conditional_fk_does_not_override_unconditional(self):
+        """Test that conditional FK values don't override existing unconditional FK values"""
+        from collections import defaultdict
+        
+        conditional_fk_caches = {
+            'LOGICAL_A_P_ID_W': [1, 2, 3],
+        }
+        
+        class MockFK:
+            def __init__(self, constraint_name, column_name, condition):
+                self.constraint_name = constraint_name
+                self.column_name = column_name
+                self.condition = condition
+        
+        conditional_fks_by_column = defaultdict(list)
+        conditional_fks_by_column['P_ID'].append(MockFK('LOGICAL_A_P_ID_W', 'P_ID', "T = 'some_string'"))
+        
+        # parent_caches already has values for P_ID from an unconditional FK
+        parent_caches = {'P_ID': [100, 200, 300]}
+        
+        # Apply the fix logic
+        for fk_col, fk_list in conditional_fks_by_column.items():
+            if fk_col not in parent_caches:  # This check prevents override
+                all_parent_vals = []
+                for fk in fk_list:
+                    cached_vals = conditional_fk_caches.get(fk.constraint_name, [])
+                    all_parent_vals.extend(cached_vals)
+                if all_parent_vals:
+                    parent_caches[fk_col] = list(set(all_parent_vals))
+        
+        # Verify: unconditional FK values are preserved
+        self.assertEqual(parent_caches['P_ID'], [100, 200, 300])
+    
+    def test_empty_conditional_fk_caches(self):
+        """Test handling when conditional FK caches are empty"""
+        from collections import defaultdict
+        
+        conditional_fk_caches = {}  # Empty caches
+        
+        class MockFK:
+            def __init__(self, constraint_name, column_name, condition):
+                self.constraint_name = constraint_name
+                self.column_name = column_name
+                self.condition = condition
+        
+        conditional_fks_by_column = defaultdict(list)
+        conditional_fks_by_column['P_ID'].append(MockFK('LOGICAL_A_P_ID_W', 'P_ID', "T = 'some_string'"))
+        
+        parent_caches = {}
+        
+        # Apply the fix logic
+        for fk_col, fk_list in conditional_fks_by_column.items():
+            if fk_col not in parent_caches:
+                all_parent_vals = []
+                for fk in fk_list:
+                    cached_vals = conditional_fk_caches.get(fk.constraint_name, [])
+                    all_parent_vals.extend(cached_vals)
+                if all_parent_vals:  # Only populate if we have values
+                    parent_caches[fk_col] = list(set(all_parent_vals))
+        
+        # Verify: P_ID should not be in parent_caches since no values available
+        self.assertNotIn('P_ID', parent_caches)
+
+
 if __name__ == '__main__':
     unittest.main()

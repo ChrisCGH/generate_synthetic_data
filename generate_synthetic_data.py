@@ -573,6 +573,21 @@ class FastSyntheticGenerator:
             if "{0}.{1}".format(fk.table_schema, fk.table_name) == node and fk.condition:
                 conditional_fks_by_column[fk.column_name].append(fk)
         
+        # For columns with conditional FKs, combine all parent values into parent_caches
+        # This enables Cartesian product generation with the full pool of possible values
+        for fk_col, fk_list in conditional_fks_by_column.items():
+            # Only populate parent_caches if there's no unconditional FK for this column
+            if fk_col not in parent_caches:
+                all_parent_vals = []
+                for fk in fk_list:
+                    cached_vals = conditional_fk_caches.get(fk.constraint_name, [])
+                    all_parent_vals.extend(cached_vals)
+                if all_parent_vals:
+                    # Use unique values for Cartesian product
+                    parent_caches[fk_col] = list(set(all_parent_vals))
+                    debug_print("{0}: Conditional FK column {1} has {2} total unique parent values from {3} tables".format(
+                        node, fk_col, len(parent_caches[fk_col]), len(fk_list)))
+        
         composite_cfgs = self.find_composite_fks_for_child(node)
         composite_columns_all = set()
         for comp in composite_cfgs:
