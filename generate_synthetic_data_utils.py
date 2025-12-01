@@ -68,9 +68,51 @@ def rand_datetime(rng, start_year=2010, end_year=None):
     return (start + timedelta(seconds=secs)).strftime("%Y-%m-%d %H:%M:%S")
 
 ColumnMeta = namedtuple("ColumnMeta", ["name","data_type","is_nullable","column_type","column_key","extra","char_max_length","numeric_precision","numeric_scale","column_default"])
-FKMeta = namedtuple("FKMeta", ["constraint_name","table_schema","table_name","column_name","referenced_table_schema","referenced_table_name","referenced_column_name","is_logical"])
+FKMeta = namedtuple("FKMeta", ["constraint_name","table_schema","table_name","column_name","referenced_table_schema","referenced_table_name","referenced_column_name","is_logical","condition"])
 TableMeta = namedtuple("TableMeta", ["schema","name","columns","pk_columns","auto_increment","engine"])
 UniqueConstraint = namedtuple("UniqueConstraint", ["constraint_name","columns"])
+
+def parse_fk_condition(condition_str):
+    """
+    Parse a simple FK condition like "T = 'some_string'"
+    Returns: dict with 'column', 'operator', 'value' or None if parsing fails
+    """
+    if not condition_str:
+        return None
+    
+    # Simple equality check: "column = 'value'"
+    match = re.match(r"^\s*(\w+)\s*=\s*'([^']*)'\s*$", condition_str)
+    if match:
+        return {
+            'column': match.group(1),
+            'operator': '=',
+            'value': match.group(2)
+        }
+    
+    # Add support for other patterns as needed
+    return None
+
+def evaluate_fk_condition(condition_str, row):
+    """
+    Evaluate a FK condition against a row.
+    Returns True if condition is met, False otherwise.
+    If condition is None or empty, returns True (unconditional FK).
+    """
+    if not condition_str:
+        return True
+    
+    parsed = parse_fk_condition(condition_str)
+    if not parsed:
+        debug_print("WARNING: Could not parse condition: {0}".format(condition_str))
+        return False
+    
+    discriminator_col = parsed['column']
+    discriminator_value = row.get(discriminator_col)
+    
+    if parsed['operator'] == '=':
+        return discriminator_value == parsed['value']
+    
+    return False
 
 def sql_literal(value):
     if value is None:
