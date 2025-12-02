@@ -1,10 +1,112 @@
 #!/usr/bin/env python3
 """Utility functions and data structures for synthetic data generation"""
-import hashlib, hmac, re, random
+import hashlib, hmac, re, random, sys
 from datetime import datetime, timedelta
 from collections import namedtuple
 
 GLOBALS = {"debug": False}
+
+
+def parse_date(date_str):
+    """
+    Parse date string in various formats.
+    Supports: YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, ISO format
+    
+    Returns: datetime object or None if parsing fails
+    """
+    if not date_str:
+        return None
+    formats = [
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S"
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_populate_columns_config(table_cfg):
+    """
+    Parse populate_columns configuration supporting both formats:
+    - String: "column_name" (backward compatible)
+    - Object: {"column": "name", "min": X, "max": Y} or {"column": "name", "values": [...]}
+    
+    Returns: dict mapping column_name -> config_object
+    """
+    populate_cols = {}
+    for item in table_cfg.get("populate_columns", []):
+        if isinstance(item, str):
+            # Backward compatible: simple column name
+            populate_cols[item] = {"column": item}
+        elif isinstance(item, dict):
+            # Extended format
+            col_name = item.get("column")
+            if col_name:
+                populate_cols[col_name] = item
+            else:
+                print("WARNING: populate_columns entry missing 'column' field: {0}".format(item), file=sys.stderr)
+    return populate_cols
+
+
+def validate_populate_column_config(col_meta, config):
+    """
+    Validate that the configuration is appropriate for the column type.
+    
+    Args:
+        col_meta: ColumnMeta object
+        config: dict with configuration for the column
+    
+    Returns: bool indicating if configuration is valid (warnings are printed but don't fail)
+    """
+    if not config:
+        return True
+    
+    dtype = (col_meta.data_type or "").lower()
+    
+    if "values" in config and "min" in config:
+        print("WARNING: Column {0} has both 'values' and 'min/max' - 'values' will take precedence".format(
+            col_meta.name), file=sys.stderr)
+    
+    if "min" in config and "max" in config:
+        min_val = config["min"]
+        max_val = config["max"]
+        
+        # Type-specific validation for integer types
+        if dtype in ("int", "integer", "bigint", "smallint", "tinyint", "mediumint"):
+            if not isinstance(min_val, int) or not isinstance(max_val, int):
+                print("WARNING: Column {0} is integer type but min/max are not integers".format(
+                    col_meta.name), file=sys.stderr)
+        
+        # Min < Max validation for numeric types
+        if dtype in ("int", "integer", "bigint", "smallint", "tinyint", "mediumint", 
+                     "decimal", "numeric", "float", "double", "real"):
+            if min_val >= max_val:
+                print("ERROR: Column {0} has min >= max ({1} >= {2})".format(
+                    col_meta.name, min_val, max_val), file=sys.stderr)
+                return False
+        
+        # Date validation
+        if dtype in ("date", "datetime", "timestamp"):
+            min_date = parse_date(str(min_val))
+            max_date = parse_date(str(max_val))
+            if min_date is None:
+                print("ERROR: Column {0} has invalid min date format: {1}".format(
+                    col_meta.name, min_val), file=sys.stderr)
+                return False
+            if max_date is None:
+                print("ERROR: Column {0} has invalid max date format: {1}".format(
+                    col_meta.name, max_val), file=sys.stderr)
+                return False
+            if min_date >= max_date:
+                print("ERROR: Column {0} has min date >= max date ({1} >= {2})".format(
+                    col_meta.name, min_val, max_val), file=sys.stderr)
+                return False
+    
+    return True
 
 def debug_print(*args, **kwargs):
     if GLOBALS["debug"]:
@@ -66,6 +168,100 @@ def rand_datetime(rng, start_year=2010, end_year=None):
     delta = end - start
     secs = rng.randint(0, int(delta.total_seconds()))
     return (start + timedelta(seconds=secs)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def generate_value_with_config(rng, col, config=None):
+    """
+    Generate a random value for a column, optionally using extended configuration.
+    
+    Args:
+        rng: Random number generator
+        col: ColumnMeta object
+        config: Optional dict with 'min', 'max', or 'values' keys
+    
+    Returns: Generated value appropriate for the column type
+    """
+    if config is None:
+        config = {}
+    
+    dtype = (col.data_type or "").lower()
+    
+    # Check if specific values are provided
+    if "values" in config:
+        debug_print("Column {0}: Using values list {1}".format(col.name, config["values"]))
+        return rng.choice(config["values"])
+    
+    # Check for min/max range
+    min_val = config.get("min")
+    max_val = config.get("max")
+    has_range = min_val is not None and max_val is not None
+    
+    # Handle integer types with ranges
+    if "int" in dtype or dtype in ("bigint", "smallint", "mediumint", "tinyint"):
+        if has_range:
+            debug_print("Column {0}: Using int range [{1}, {2}]".format(col.name, min_val, max_val))
+            return rng.randint(int(min_val), int(max_val))
+        # Default integer generation
+        if re.search(r"age|years? ", col.name, re.I):
+            return rng.randint(18, 80)
+        return rng.randint(0, 10000)
+    
+    # Handle decimal/float types with ranges
+    elif dtype in ("decimal", "numeric", "float", "double", "real"):
+        if has_range:
+            debug_print("Column {0}: Using decimal range [{1}, {2}]".format(col.name, min_val, max_val))
+            return round(rng.uniform(float(min_val), float(max_val)), 2)
+        # Default decimal generation
+        prec = int(col.numeric_precision or 10)
+        scale = int(col.numeric_scale or 0)
+        return rand_decimal_str(rng, prec, scale)
+    
+    # Handle date/datetime/timestamp types with ranges
+    elif dtype in ("date", "datetime", "timestamp"):
+        if has_range:
+            min_date = parse_date(str(min_val))
+            max_date = parse_date(str(max_val))
+            if min_date and max_date:
+                debug_print("Column {0}: Using date range [{1}, {2}]".format(col.name, min_val, max_val))
+                delta = max_date - min_date
+                random_days = rng.randint(0, max(0, delta.days))
+                random_date = min_date + timedelta(days=random_days)
+                
+                if dtype == "date":
+                    return random_date.strftime("%Y-%m-%d")
+                else:  # datetime/timestamp
+                    # Add random time component
+                    random_seconds = rng.randint(0, 86399)
+                    random_datetime = random_date + timedelta(seconds=random_seconds)
+                    return random_datetime.strftime("%Y-%m-%d %H:%M:%S")
+        # Default date generation
+        return rand_datetime(rng).split(" ")[0] if dtype == "date" else rand_datetime(rng)
+    
+    # Handle string types
+    elif dtype in ("varchar", "char", "text", "mediumtext", "longtext"):
+        lname = col.name.lower()
+        if "email" in lname:
+            return rand_email(rng)
+        elif "name" in lname:
+            return rand_name(rng)
+        elif "phone" in lname:
+            return rand_phone(rng)
+        else:
+            maxlen = int(col.char_max_length) if col.char_max_length else 24
+            return rand_string(rng, min(maxlen, 24))
+    
+    # Handle enum types
+    elif dtype == "enum":
+        m = re.findall(r"'((?:[^']|(?:''))*)'", col.column_type or "")
+        vals = [v.replace("''", "'") for v in m]
+        return rng.choice(vals) if vals else None
+    
+    # Default: return random string for non-nullable columns
+    elif col.is_nullable == "NO":
+        return rand_string(rng, 8)
+    
+    return None
+
 
 ColumnMeta = namedtuple("ColumnMeta", ["name","data_type","is_nullable","column_type","column_key","extra","char_max_length","numeric_precision","numeric_scale","column_default"])
 FKMeta = namedtuple("FKMeta", ["constraint_name","table_schema","table_name","column_name","referenced_table_schema","referenced_table_name","referenced_column_name","is_logical","condition"])

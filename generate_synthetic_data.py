@@ -166,6 +166,12 @@ class FastSyntheticGenerator:
         self.default_rows_per_table = args.rows if args.rows is not None else 100
         if args.scale is not None:
             self.default_rows_per_table = max(1, int(self.default_rows_per_table * args.scale))
+        
+        # Parse populate_columns configuration for extended format support
+        self.populate_columns_config = {}
+        for table_cfg in self.config:
+            node = "{0}.{1}".format(table_cfg["schema"], table_cfg["table"])
+            self.populate_columns_config[node] = parse_populate_columns_config(table_cfg)
     
     def introspect(self):
         """Load schema metadata"""
@@ -358,6 +364,9 @@ class FastSyntheticGenerator:
         populate_columns = cfg.get("populate_columns") if cfg else None
         fk_cols = self.fk_columns.get(table_key, set())
         
+        # Get extended populate_columns configuration
+        populate_config = self.populate_columns_config.get(table_key, {})
+        
         unique_constraints = self.unique_constraints.get(table_key, [])
         
         single_unique_cols = set()
@@ -405,12 +414,36 @@ class FastSyntheticGenerator:
                 
                 is_in_unique = cname in all_unique_cols
                 
+                # Check if column is in populate_columns (either simple or extended format)
                 if col.is_nullable == "YES" and not is_in_unique:
-                    if populate_columns is None or cname not in populate_columns:
+                    if populate_columns is None or cname not in populate_config:
                         continue
                 
                 base_value = None
                 
+                # Check if this column has extended configuration
+                col_config = populate_config.get(cname)
+                
+                if col_config and ("values" in col_config or "min" in col_config):
+                    # Use extended configuration to generate value
+                    base_value = generate_value_with_config(thread_rng, col, col_config)
+                    
+                    # Handle unique constraint for string types with extended config
+                    if is_in_unique and dtype in ("varchar", "char", "text", "mediumtext", "longtext") and base_value is not None:
+                        maxlen = int(col.char_max_length) if col.char_max_length else 255
+                        base_str = str(base_value)
+                        suffix = "_{0}".format(batch_idx)
+                        max_base_len = maxlen - len(suffix)
+                        if max_base_len < 1:
+                            row[cname] = suffix[1:maxlen]
+                        else:
+                            row[cname] = (base_str[:max_base_len] + suffix)[:maxlen]
+                        continue
+                    
+                    row[cname] = base_value
+                    continue
+                
+                # Default value generation (unchanged from original logic)
                 if "int" in dtype or dtype in ("bigint", "smallint", "mediumint", "tinyint"):
                     if is_in_unique:
                         row[cname] = batch_idx
