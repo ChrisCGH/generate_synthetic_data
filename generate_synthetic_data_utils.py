@@ -6,6 +6,9 @@ from collections import namedtuple
 
 GLOBALS = {"debug": False}
 
+# Maximum attempt multiplier for generating unique values (used in generate_unique_value_pool)
+UNIQUE_VALUE_MAX_ATTEMPTS_MULTIPLIER = 10
+
 
 def parse_date(date_str):
     """
@@ -371,14 +374,17 @@ def generate_unique_value_pool(col_meta, config, needed_count, rng):
         min_val = config.get("min", 0.0)
         max_val = config.get("max", 1000000.0)
         
+        # Use column's numeric_scale for rounding precision, default to 2
+        scale = int(col_meta.numeric_scale) if col_meta.numeric_scale else 2
+        
         # For floats, generate random unique values
         # Use a set to ensure uniqueness
         unique_values = set()
         attempts = 0
-        max_attempts = needed_count * 10
+        max_attempts = needed_count * UNIQUE_VALUE_MAX_ATTEMPTS_MULTIPLIER
         
         while len(unique_values) < needed_count and attempts < max_attempts:
-            val = round(rng.uniform(float(min_val), float(max_val)), 2)
+            val = round(rng.uniform(float(min_val), float(max_val)), scale)
             unique_values.add(val)
             attempts += 1
         
@@ -396,13 +402,16 @@ def generate_unique_value_pool(col_meta, config, needed_count, rng):
         # Generate random strings with guaranteed uniqueness
         unique_values = set()
         max_length = col_meta.char_max_length or 20
+        # Use actual max length, but cap at reasonable value for performance
+        effective_max = min(int(max_length), 50)
+        min_length = min(5, effective_max)
         
         attempts = 0
-        max_attempts = needed_count * 10
+        max_attempts = needed_count * UNIQUE_VALUE_MAX_ATTEMPTS_MULTIPLIER
         
         while len(unique_values) < needed_count and attempts < max_attempts:
             # Generate random string
-            length = rng.randint(5, min(max_length, 20))
+            length = rng.randint(min_length, effective_max)
             val = ''.join(rng.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(length))
             unique_values.add(val)
             attempts += 1
