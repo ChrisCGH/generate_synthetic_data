@@ -5,8 +5,7 @@ import random
 from generate_synthetic_data_utils import (
     generate_value_with_config,
     validate_set_value,
-    ColumnMeta,
-    GLOBALS
+    ColumnMeta
 )
 
 

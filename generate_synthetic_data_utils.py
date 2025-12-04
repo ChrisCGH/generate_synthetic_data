@@ -505,12 +505,12 @@ def validate_set_value(set_definition, value):
     Returns:
         bool: True if valid
     """
-    if not value:  # Empty string is valid
+    if value is None or value == '':  # Empty string is valid
         return True
     
     # Parse allowed values
     m = re.findall(r"'((?:[^']|(?:''))*)'", set_definition or "")
-    allowed_values = set([v.replace("''", "'") for v in m])
+    allowed_values = {v.replace("''", "'") for v in m}
     
     # Parse provided value
     provided_values = [v.strip() for v in str(value).split(',')]
