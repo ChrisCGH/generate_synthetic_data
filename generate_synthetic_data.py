@@ -425,7 +425,6 @@ class FastSyntheticGenerator:
         # 3. NOT a foreign key column
         # 4. NOT a primary key column
         cols_needing_sequential = set()
-        composite_unique_controlled_cols = {}  # Maps constraint -> list of controlled columns
         
         for uc in composite_unique_constraints:
             controlled_cols_in_constraint = []
@@ -451,7 +450,6 @@ class FastSyntheticGenerator:
                 # The uncontrolled column(s) need sequential generation
                 for col_name in uncontrolled_cols_in_constraint:
                     cols_needing_sequential.add(col_name)
-                composite_unique_controlled_cols[uc.constraint_name] = controlled_cols_in_constraint
         
         for batch_idx in range(start_idx, end_idx):
             row = {}
@@ -491,8 +489,11 @@ class FastSyntheticGenerator:
                         counter_val = self.composite_unique_counters[counter_key]
                         self.composite_unique_counters[counter_key] += 1
                     
-                    # Get max length for string types
-                    maxlen = int(col.char_max_length) if col.char_max_length else 255
+                    # Get max length for string types with safe conversion
+                    try:
+                        maxlen = int(col.char_max_length) if col.char_max_length else 255
+                    except (ValueError, TypeError):
+                        maxlen = 255
                     
                     # Format: seq_{counter} with zero-padding for better sorting
                     # Use enough digits to handle large row counts (10 million = 8 digits)
