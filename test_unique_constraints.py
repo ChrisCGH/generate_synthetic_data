@@ -282,5 +282,129 @@ class TestEdgeCases(unittest.TestCase):
         self.assertEqual(len(set(pool)), needed)
 
 
+class TestCrossBatchUniqueness(unittest.TestCase):
+    """Test that unique values are maintained across multiple batches"""
+    
+    def setUp(self):
+        self.rng = random.Random(42)
+    
+    def _make_column(self, name, data_type, **kwargs):
+        """Helper to create ColumnMeta"""
+        return ColumnMeta(
+            name=name, data_type=data_type, is_nullable="YES",
+            column_type=kwargs.get("column_type", data_type),
+            column_key="", extra="",
+            char_max_length=kwargs.get("char_max_length", 255),
+            numeric_precision=kwargs.get("numeric_precision", 10),
+            numeric_scale=kwargs.get("numeric_scale", 2),
+            column_default=None
+        )
+    
+    def test_global_pool_prevents_cross_batch_duplicates(self):
+        """Test that a single global pool used across batches produces no duplicates"""
+        col = self._make_column("WID", "int")
+        config = {"column": "WID", "min": 10000, "max": 100000}
+        
+        # Simulate total rows needed across all batches
+        total_rows = 5000
+        
+        # Generate one pool for the entire table (like the fix does)
+        global_pool = generate_unique_value_pool(col, config, total_rows, self.rng)
+        
+        # All values should be unique
+        self.assertEqual(len(global_pool), total_rows)
+        self.assertEqual(len(set(global_pool)), total_rows)
+        
+        # Simulate extracting values for different batches
+        batch_size = 1000
+        all_values_used = []
+        
+        for batch_num in range(5):
+            start_idx = batch_num * batch_size
+            end_idx = start_idx + batch_size
+            batch_values = global_pool[start_idx:end_idx]
+            all_values_used.extend(batch_values)
+        
+        # All values across all batches should be unique
+        self.assertEqual(len(all_values_used), total_rows)
+        self.assertEqual(len(set(all_values_used)), total_rows)
+    
+    def test_per_batch_pools_cause_duplicates(self):
+        """Demonstrate that per-batch pools would cause duplicates (the bug)"""
+        col = self._make_column("WID", "int")
+        config = {"column": "WID", "min": 10000, "max": 10100}  # Small range to force overlaps
+        
+        batch_size = 50
+        num_batches = 3
+        
+        # Simulate per-batch pool generation (the buggy behavior)
+        all_values = []
+        for batch_num in range(num_batches):
+            # Each batch creates its OWN rng and pool
+            batch_rng = random.Random(42 + batch_num)  # Different seed per batch
+            batch_pool = generate_unique_value_pool(col, config, batch_size, batch_rng)
+            all_values.extend(batch_pool)
+        
+        # With only 101 possible values and 150 values needed across batches,
+        # duplicates are likely when using per-batch pools
+        total_values = len(all_values)
+        unique_values = len(set(all_values))
+        
+        # This demonstrates the bug: per-batch pools can cause duplicates
+        # (Note: This test shows the problem, not the solution)
+        self.assertEqual(total_values, 150)
+        # With per-batch pools, unique values < total values (duplicates exist)
+        self.assertLess(unique_values, total_values)
+    
+    def test_global_pool_with_concurrent_access(self):
+        """Test that global pool works correctly with simulated concurrent access"""
+        import threading
+        
+        col = self._make_column("code", "int")
+        config = {"column": "code", "min": 1, "max": 1000}
+        total_rows = 500
+        
+        # Generate the global pool
+        global_pool = generate_unique_value_pool(col, config, total_rows, self.rng)
+        
+        # Simulate thread-safe cursor (like the fix implements)
+        cursor = [0]  # Use list to allow mutation in nested function
+        lock = threading.Lock()
+        extracted_values = []
+        
+        def extract_values(count):
+            """Extract values from pool with thread-safe cursor"""
+            batch_values = []
+            for _ in range(count):
+                with lock:
+                    if cursor[0] < len(global_pool):
+                        batch_values.append(global_pool[cursor[0]])
+                        cursor[0] += 1
+            return batch_values
+        
+        # Simulate 5 threads each extracting 100 values
+        threads = []
+        results = [None] * 5
+        
+        def worker(thread_id):
+            results[thread_id] = extract_values(100)
+        
+        for i in range(5):
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+            t.start()
+        
+        for t in threads:
+            t.join()
+        
+        # Combine all extracted values
+        for result in results:
+            extracted_values.extend(result)
+        
+        # All extracted values should be unique
+        self.assertEqual(len(extracted_values), 500)
+        self.assertEqual(len(set(extracted_values)), 500)
+
+
 if __name__ == '__main__':
     unittest.main()

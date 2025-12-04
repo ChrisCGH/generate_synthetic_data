@@ -172,6 +172,11 @@ class FastSyntheticGenerator:
         for table_cfg in self.config:
             node = "{0}.{1}".format(table_cfg["schema"], table_cfg["table"])
             self.populate_columns_config[node] = parse_populate_columns_config(table_cfg)
+        
+        # Global unique value pools: maintained across all batches for UNIQUE columns
+        # Format: {"schema.table.column": {"pool": [...], "cursor": 0, "size": N}}
+        self.global_unique_value_pools = {}
+        self.global_unique_pool_lock = threading.Lock()
     
     def introspect(self):
         """Load schema metadata"""
@@ -222,6 +227,13 @@ class FastSyntheticGenerator:
                 self.unique_value_trackers[key] = {uc.constraint_name: set() for uc in unique_cons}
                 if pkcols:
                     self. used_pk_values[key] = set()
+                
+                # Debug log UNIQUE constraints
+                if unique_cons:
+                    unique_cols = set()
+                    for uc in unique_cons:
+                        unique_cols.update(uc.columns)
+                    debug_print("{0}: UNIQUE columns: {1}".format(key, unique_cols))
                 
                 cfg = self.table_map.get(key, {})
                 num_rows = cfg.get("rows") or self.default_rows_per_table
@@ -384,30 +396,18 @@ class FastSyntheticGenerator:
         
         local_trackers = {uc.constraint_name: set() for uc in unique_constraints}
         
-        # Pre-allocate unique values for UNIQUE columns that have min/max or values config
-        batch_size = end_idx - start_idx
-        unique_value_pools = {}
+        # Identify UNIQUE columns that use global pools (have min/max or values config)
+        unique_cols_with_global_pools = set()
         for col_name in single_unique_cols:
             if col_name in populate_config and col_name not in tmeta.pk_columns:
                 col_config = populate_config[col_name]
-                # Only pre-allocate if config has min/max or values (not just column name)
                 if "min" in col_config or "values" in col_config:
-                    col_meta = next((c for c in tmeta.columns if c.name == col_name), None)
-                    if col_meta:
-                        unique_pool = generate_unique_value_pool(col_meta, col_config, batch_size, thread_rng)
-                        if len(unique_pool) < batch_size:
-                            debug_print("{0}: WARNING: UNIQUE column {1} has insufficient unique values ({2} available, {3} needed)".format(
-                                node, col_name, len(unique_pool), batch_size))
-                        unique_value_pools[col_name] = unique_pool
-                        debug_print("{0}: Pre-allocated {1} unique values for column {2}".format(
-                            node, len(unique_pool), col_name))
-        
-        # Track which pre-allocated value to use next for each UNIQUE column
-        unique_value_indexes = {col: 0 for col in unique_value_pools.keys()}
+                    pool_key = "{0}.{1}".format(node, col_name)
+                    if pool_key in self.global_unique_value_pools:
+                        unique_cols_with_global_pools.add(col_name)
         
         for batch_idx in range(start_idx, end_idx):
             row = {}
-            row_offset = batch_idx - start_idx  # Index within this batch for pre-allocated values
             
             for col in tmeta.columns:
                 cname = col.name
@@ -443,18 +443,28 @@ class FastSyntheticGenerator:
                 
                 base_value = None
                 
-                # Check if this column has pre-allocated unique values
-                if cname in unique_value_pools:
-                    pool = unique_value_pools[cname]
-                    if row_offset < len(pool):
-                        row[cname] = pool[row_offset]
-                    else:
-                        # Fall back to batch_idx if pool is exhausted
-                        debug_print("{0}: Pool exhausted for column {1}, using batch_idx fallback".format(node, cname))
-                        row[cname] = batch_idx
+                # PRIORITY 1: Use global unique value pool (thread-safe)
+                if cname in unique_cols_with_global_pools:
+                    pool_key = "{0}.{1}".format(node, cname)
+                    pool_data = self.global_unique_value_pools[pool_key]
+                    
+                    with self.global_unique_pool_lock:
+                        cursor = pool_data['cursor']
+                        if cursor < pool_data['size']:
+                            row[cname] = pool_data['pool'][cursor]
+                            pool_data['cursor'] += 1
+                            # Debug progress logging every 1000 values
+                            if pool_data['cursor'] % 1000 == 0:
+                                debug_print("{0}: Used {1}/{2} unique values for column {3}".format(
+                                    node, pool_data['cursor'], pool_data['size'], cname))
+                        else:
+                            # Pool exhausted - this shouldn't happen if range is sufficient
+                            print("ERROR: {0}: Exhausted unique value pool for {1} at row {2}".format(
+                                node, cname, batch_idx), file=sys.stderr)
+                            row[cname] = None
                     continue
                 
-                # Check if this column has extended configuration
+                # PRIORITY 2: Check if this column has extended configuration (but not a global pool)
                 col_config = populate_config.get(cname)
                 
                 if col_config and ("values" in col_config or "min" in col_config):
@@ -557,6 +567,57 @@ class FastSyntheticGenerator:
                 if not any(v is None for v in value_tuple):
                     self.unique_value_trackers[node][uc.constraint_name].add(value_tuple)
     
+    def initialize_global_unique_pools(self, node, num_rows):
+        """Initialize global unique value pools for a table's UNIQUE columns.
+        
+        This creates a single pool for each UNIQUE column that is shared across all batches,
+        ensuring no duplicates within the same column across the entire table.
+        """
+        tmeta = self.metadata.get(node)
+        if not tmeta:
+            return
+        
+        unique_constraints = self.unique_constraints.get(node, [])
+        populate_config = self.populate_columns_config.get(node, {})
+        
+        # Identify single-column UNIQUE constraints
+        single_unique_cols = set()
+        for uc in unique_constraints:
+            if len(uc.columns) == 1:
+                single_unique_cols.add(uc.columns[0])
+        
+        # Create global pools for UNIQUE columns that have min/max or values config
+        for col_name in single_unique_cols:
+            if col_name in populate_config and col_name not in tmeta.pk_columns:
+                col_config = populate_config[col_name]
+                # Only pre-allocate if config has min/max or values (not just column name)
+                if "min" in col_config or "values" in col_config:
+                    pool_key = "{0}.{1}".format(node, col_name)
+                    
+                    # Skip if pool already exists (shouldn't happen but defensive)
+                    if pool_key in self.global_unique_value_pools:
+                        continue
+                    
+                    col_meta = next((c for c in tmeta.columns if c.name == col_name), None)
+                    if col_meta:
+                        # Generate pool for ALL rows, not just batch size
+                        unique_pool = generate_unique_value_pool(col_meta, col_config, num_rows, self.rng)
+                        
+                        if len(unique_pool) < num_rows:
+                            print("WARNING: {0}: UNIQUE column {1} has insufficient unique values ({2} available, {3} needed)".format(
+                                node, col_name, len(unique_pool), num_rows), file=sys.stderr)
+                            print("  Consider expanding the range or reducing row count", file=sys.stderr)
+                        
+                        # Store pool with cursor at 0
+                        self.global_unique_value_pools[pool_key] = {
+                            'pool': unique_pool,
+                            'cursor': 0,
+                            'size': len(unique_pool)
+                        }
+                        
+                        debug_print("{0}: Created global unique pool for {1} with {2} values".format(
+                            node, col_name, len(unique_pool)))
+    
     def generate_parallel(self, order, rows_per_table):
         """Generate all rows in parallel with chunked processing"""
         max_workers = self.args.threads
@@ -570,6 +631,9 @@ class FastSyntheticGenerator:
             
             cfg = self.table_map.get(node)
             num_rows = rows_per_table. get(node, self.default_rows_per_table)
+            
+            # Initialize global unique value pools for this table BEFORE generating rows
+            self.initialize_global_unique_pools(node, num_rows)
             
             if num_rows < 1000 or max_workers == 1:
                 thread_rng = random.Random(self.args.seed + hash(node))
