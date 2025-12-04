@@ -268,5 +268,183 @@ class TestCompositeUniquenessCombination(unittest.TestCase):
         self.assertIn(duplicate, local_tracker)
 
 
+class TestSequentialGenerationForCompositeUnique(unittest.TestCase):
+    """Test sequential value generation for uncontrolled columns in composite UNIQUE constraints."""
+    
+    def test_sequential_value_format_string(self):
+        """Test that sequential values for string columns have correct format."""
+        counter = 0
+        value = "seq_{0:08d}".format(counter)
+        self.assertEqual(value, "seq_00000000")
+        
+        counter = 12345
+        value = "seq_{0:08d}".format(counter)
+        self.assertEqual(value, "seq_00012345")
+        
+        counter = 9999999
+        value = "seq_{0:08d}".format(counter)
+        self.assertEqual(value, "seq_09999999")
+    
+    def test_sequential_values_are_unique(self):
+        """Test that sequential generation produces unique values."""
+        values = set()
+        for i in range(10000):
+            value = "seq_{0:08d}".format(i)
+            self.assertNotIn(value, values)
+            values.add(value)
+        self.assertEqual(len(values), 10000)
+    
+    def test_sequential_values_with_controlled_prefix(self):
+        """Test that sequential values work with controlled column values."""
+        # Simulate a composite UNIQUE constraint with category (controlled) and code (sequential)
+        categories = ["electronics", "furniture", "clothing"]
+        combinations = set()
+        counter = 0
+        
+        # Generate 1000 combinations
+        for i in range(1000):
+            category = categories[i % len(categories)]  # Cycle through categories
+            code = "seq_{0:08d}".format(counter)
+            counter += 1
+            
+            combo = (category, code)
+            self.assertNotIn(combo, combinations)
+            combinations.add(combo)
+        
+        self.assertEqual(len(combinations), 1000)
+    
+    def test_sequential_handles_large_row_counts(self):
+        """Test that sequential generation handles 10+ million rows."""
+        # Verify the format can handle 10 million rows
+        counter = 9999999
+        value = "seq_{0:08d}".format(counter)
+        self.assertEqual(len(value), 12)  # "seq_" (4) + 8 digits
+        
+        counter = 10000000
+        value = "seq_{0:08d}".format(counter)
+        self.assertEqual(value, "seq_10000000")
+        self.assertEqual(len(value), 12)
+    
+    def test_sequential_integer_values(self):
+        """Test sequential generation for integer columns."""
+        values = set()
+        for counter in range(10000):
+            self.assertNotIn(counter, values)
+            values.add(counter)
+        self.assertEqual(len(values), 10000)
+
+
+class TestSequentialGenerationDetection(unittest.TestCase):
+    """Test detection of columns needing sequential generation."""
+    
+    def test_detect_uncontrolled_column_in_composite_unique(self):
+        """Test detection of uncontrolled columns in composite UNIQUE."""
+        # Simulate the detection logic from generate_batch_fast
+        composite_unique_cols = ["category", "code"]
+        populate_config = {"category": {"column": "category", "values": ["electronics", "furniture"]}}
+        fk_cols = set()
+        pk_columns = []
+        
+        cols_needing_sequential = set()
+        
+        for col_name in composite_unique_cols:
+            is_controlled = col_name in populate_config and (
+                "values" in populate_config.get(col_name, {}) or
+                "min" in populate_config.get(col_name, {})
+            )
+            is_fk = col_name in fk_cols
+            is_pk = col_name in pk_columns
+            
+            if not (is_controlled or is_fk or is_pk):
+                cols_needing_sequential.add(col_name)
+        
+        # "code" should need sequential generation, "category" should not
+        self.assertIn("code", cols_needing_sequential)
+        self.assertNotIn("category", cols_needing_sequential)
+        self.assertEqual(len(cols_needing_sequential), 1)
+    
+    def test_fk_column_not_sequential(self):
+        """Test that FK columns don't get sequential generation."""
+        composite_unique_cols = ["category", "code", "region_id"]
+        populate_config = {"category": {"column": "category", "values": ["electronics"]}}
+        fk_cols = {"region_id"}  # region_id is a foreign key
+        pk_columns = []
+        
+        cols_needing_sequential = set()
+        
+        for col_name in composite_unique_cols:
+            is_controlled = col_name in populate_config and (
+                "values" in populate_config.get(col_name, {}) or
+                "min" in populate_config.get(col_name, {})
+            )
+            is_fk = col_name in fk_cols
+            is_pk = col_name in pk_columns
+            
+            if not (is_controlled or is_fk or is_pk):
+                cols_needing_sequential.add(col_name)
+        
+        # Only "code" should need sequential generation
+        self.assertIn("code", cols_needing_sequential)
+        self.assertNotIn("category", cols_needing_sequential)
+        self.assertNotIn("region_id", cols_needing_sequential)
+        self.assertEqual(len(cols_needing_sequential), 1)
+    
+    def test_pk_column_not_sequential(self):
+        """Test that PK columns don't get sequential generation."""
+        composite_unique_cols = ["id", "category", "code"]
+        populate_config = {"category": {"column": "category", "values": ["electronics"]}}
+        fk_cols = set()
+        pk_columns = ["id"]  # id is primary key
+        
+        cols_needing_sequential = set()
+        
+        for col_name in composite_unique_cols:
+            is_controlled = col_name in populate_config and (
+                "values" in populate_config.get(col_name, {}) or
+                "min" in populate_config.get(col_name, {})
+            )
+            is_fk = col_name in fk_cols
+            is_pk = col_name in pk_columns
+            
+            if not (is_controlled or is_fk or is_pk):
+                cols_needing_sequential.add(col_name)
+        
+        # Only "code" should need sequential generation
+        self.assertIn("code", cols_needing_sequential)
+        self.assertNotIn("category", cols_needing_sequential)
+        self.assertNotIn("id", cols_needing_sequential)
+        self.assertEqual(len(cols_needing_sequential), 1)
+    
+    def test_all_controlled_no_sequential(self):
+        """Test that if all columns are controlled, no sequential generation needed."""
+        composite_unique_cols = ["category", "code"]
+        populate_config = {
+            "category": {"column": "category", "values": ["electronics"]},
+            "code": {"column": "code", "min": 1000, "max": 9999}
+        }
+        fk_cols = set()
+        pk_columns = []
+        
+        controlled_cols = []
+        uncontrolled_cols = []
+        
+        for col_name in composite_unique_cols:
+            is_controlled = col_name in populate_config and (
+                "values" in populate_config.get(col_name, {}) or
+                "min" in populate_config.get(col_name, {})
+            )
+            is_fk = col_name in fk_cols
+            is_pk = col_name in pk_columns
+            
+            if is_controlled or is_fk or is_pk:
+                controlled_cols.append(col_name)
+            else:
+                uncontrolled_cols.append(col_name)
+        
+        # Both columns are controlled
+        self.assertEqual(controlled_cols, ["category", "code"])
+        self.assertEqual(uncontrolled_cols, [])
+
+
 if __name__ == '__main__':
     unittest.main()

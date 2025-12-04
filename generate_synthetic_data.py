@@ -177,6 +177,11 @@ class FastSyntheticGenerator:
         # Format: {"schema.table.column": {"pool": [...], "cursor": 0, "size": N}}
         self.global_unique_value_pools = {}
         self.global_unique_pool_lock = threading.Lock()
+        
+        # Counters for sequential value generation in composite UNIQUE constraints
+        # Format: {"schema.table.column": counter}
+        self.composite_unique_counters = {}
+        self.composite_unique_counter_lock = threading.Lock()
     
     def introspect(self):
         """Load schema metadata"""
@@ -413,6 +418,39 @@ class FastSyntheticGenerator:
                     if pool_key in self.global_unique_value_pools:
                         unique_cols_with_global_pools.add(col_name)
         
+        # Identify columns in composite UNIQUE constraints that need sequential generation
+        # These are columns that are:
+        # 1. Part of a composite UNIQUE constraint
+        # 2. NOT controlled by populate_columns (no explicit values or range)
+        # 3. NOT a foreign key column
+        # 4. NOT a primary key column
+        cols_needing_sequential = set()
+        
+        for uc in composite_unique_constraints:
+            controlled_cols_in_constraint = []
+            uncontrolled_cols_in_constraint = []
+            
+            for col_name in uc.columns:
+                # Check if column is controlled by populate_columns
+                is_controlled = col_name in populate_config and (
+                    "values" in populate_config.get(col_name, {}) or
+                    "min" in populate_config.get(col_name, {})
+                )
+                # Also treat FK columns and PK columns as "controlled"
+                is_fk = col_name in fk_cols
+                is_pk = col_name in tmeta.pk_columns
+                
+                if is_controlled or is_fk or is_pk:
+                    controlled_cols_in_constraint.append(col_name)
+                else:
+                    uncontrolled_cols_in_constraint.append(col_name)
+            
+            if uncontrolled_cols_in_constraint and controlled_cols_in_constraint:
+                # There's at least one controlled column and at least one uncontrolled column
+                # The uncontrolled column(s) need sequential generation
+                for col_name in uncontrolled_cols_in_constraint:
+                    cols_needing_sequential.add(col_name)
+        
         for batch_idx in range(start_idx, end_idx):
             row = {}
             
@@ -440,6 +478,35 @@ class FastSyntheticGenerator:
                     continue
                 
                 dtype = (col.data_type or "").lower()
+                
+                # PRIORITY 0: Sequential generation for uncontrolled columns in composite UNIQUE constraints
+                # This prevents collisions when generating large datasets
+                if cname in cols_needing_sequential:
+                    counter_key = "{0}.{1}".format(node, cname)
+                    with self.composite_unique_counter_lock:
+                        if counter_key not in self.composite_unique_counters:
+                            self.composite_unique_counters[counter_key] = 0
+                        counter_val = self.composite_unique_counters[counter_key]
+                        self.composite_unique_counters[counter_key] += 1
+                    
+                    # Get max length for string types with safe conversion
+                    try:
+                        maxlen = int(col.char_max_length) if col.char_max_length else 255
+                    except (ValueError, TypeError):
+                        maxlen = 255
+                    
+                    # Format: seq_{counter} with zero-padding for better sorting
+                    # Use enough digits to handle large row counts (10 million = 8 digits)
+                    if dtype in ("varchar", "char", "text", "mediumtext", "longtext"):
+                        seq_value = "seq_{0:08d}".format(counter_val)
+                        row[cname] = seq_value[:maxlen]
+                    elif "int" in dtype or dtype in ("bigint", "smallint", "mediumint", "tinyint"):
+                        row[cname] = counter_val
+                    else:
+                        # For other types, use string representation
+                        seq_value = "seq_{0:08d}".format(counter_val)
+                        row[cname] = seq_value[:maxlen] if maxlen else seq_value
+                    continue
                 
                 is_in_unique = cname in all_unique_cols
                 
