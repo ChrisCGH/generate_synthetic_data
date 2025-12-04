@@ -450,6 +450,11 @@ class FastSyntheticGenerator:
                 # The uncontrolled column(s) need sequential generation
                 for col_name in uncontrolled_cols_in_constraint:
                     cols_needing_sequential.add(col_name)
+                
+                # Debug output: Log which columns will use sequential generation (only once per table)
+                if start_idx == 0:
+                    debug_print("{0}: Composite UNIQUE {1} will use sequential generation for uncontrolled columns: {2}".format(
+                        node, uc.constraint_name, uncontrolled_cols_in_constraint))
         
         for batch_idx in range(start_idx, end_idx):
             row = {}

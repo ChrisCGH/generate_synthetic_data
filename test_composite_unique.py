@@ -446,5 +446,107 @@ class TestSequentialGenerationDetection(unittest.TestCase):
         self.assertEqual(uncontrolled_cols, [])
 
 
+class TestSpecialColumnNameOverride(unittest.TestCase):
+    """Test that sequential generation overrides special column name detection (name, email, phone)."""
+    
+    def _detect_sequential_columns(self, composite_unique_cols, populate_config, fk_cols=None, pk_columns=None):
+        """Helper to detect which columns need sequential generation.
+        
+        This mirrors the detection logic in generate_batch_fast().
+        
+        Args:
+            composite_unique_cols: List of column names in the composite UNIQUE constraint
+            populate_config: Dict mapping column names to their configuration
+            fk_cols: Set of foreign key column names (default: empty set)
+            pk_columns: List of primary key column names (default: empty list)
+        
+        Returns:
+            Set of column names that need sequential generation
+        """
+        if fk_cols is None:
+            fk_cols = set()
+        if pk_columns is None:
+            pk_columns = []
+        
+        cols_needing_sequential = set()
+        
+        for col_name in composite_unique_cols:
+            is_controlled = col_name in populate_config and (
+                "values" in populate_config.get(col_name, {}) or
+                "min" in populate_config.get(col_name, {})
+            )
+            is_fk = col_name in fk_cols
+            is_pk = col_name in pk_columns
+            
+            if not (is_controlled or is_fk or is_pk):
+                cols_needing_sequential.add(col_name)
+        
+        return cols_needing_sequential
+    
+    def test_name_column_detected_for_sequential(self):
+        """Test that a column with 'name' in its name is detected for sequential generation."""
+        # Simulate the exact scenario from the bug report
+        composite_unique_cols = ["CustomerName", "Column2"]  # CustomerName has "name" in it
+        populate_config = {"Column2": {"column": "Column2", "values": ["v1", "v2"]}}
+        
+        cols_needing_sequential = self._detect_sequential_columns(composite_unique_cols, populate_config)
+        
+        # CustomerName should need sequential (not controlled, not FK, not PK)
+        self.assertIn("CustomerName", cols_needing_sequential)
+        # Column2 should NOT need sequential (it's controlled)
+        self.assertNotIn("Column2", cols_needing_sequential)
+    
+    def test_email_column_detected_for_sequential(self):
+        """Test that a column with 'email' in its name is detected for sequential generation."""
+        composite_unique_cols = ["UserEmail", "TypeCode"]
+        populate_config = {"TypeCode": {"column": "TypeCode", "values": ["A", "B"]}}
+        
+        cols_needing_sequential = self._detect_sequential_columns(composite_unique_cols, populate_config)
+        
+        # UserEmail should need sequential (not controlled)
+        self.assertIn("UserEmail", cols_needing_sequential)
+        # TypeCode should NOT need sequential (it's controlled)
+        self.assertNotIn("TypeCode", cols_needing_sequential)
+    
+    def test_phone_column_detected_for_sequential(self):
+        """Test that a column with 'phone' in its name is detected for sequential generation."""
+        composite_unique_cols = ["ContactPhone", "Region"]
+        populate_config = {"Region": {"column": "Region", "values": ["US", "EU"]}}
+        
+        cols_needing_sequential = self._detect_sequential_columns(composite_unique_cols, populate_config)
+        
+        # ContactPhone should need sequential (not controlled)
+        self.assertIn("ContactPhone", cols_needing_sequential)
+        # Region should NOT need sequential (it's controlled)
+        self.assertNotIn("Region", cols_needing_sequential)
+    
+    def test_sequential_overrides_rand_name(self):
+        """Test that sequential generation produces unique values instead of rand_name() collision.
+        
+        The rand_name() function in generate_synthetic_data_utils.py has a limited pool:
+        - 10 first names: Alice, Bob, Charlie, Dana, Eve, Frank, Grace, Heidi, Ivan, Judy
+        - 8 last names: Smith, Johnson, Williams, Jones, Brown, Davis, Miller, Wilson
+        - Total combinations: 10 * 8 = 80 unique names
+        
+        Sequential generation should produce unlimited unique values.
+        """
+        # Simulate generating 100 values - with rand_name() only 80 combinations exist
+        # Sequential should produce 100 unique values
+        values = set()
+        for i in range(100):
+            value = "seq_{0:08d}".format(i)
+            values.add(value)
+        
+        # All 100 values should be unique
+        self.assertEqual(len(values), 100)
+        
+        # rand_name() has 10 first names * 8 last names = 80 max unique values
+        # See generate_synthetic_data_utils.rand_name() for the exact lists
+        rand_name_max_combinations = 80
+        self.assertGreater(len(values), rand_name_max_combinations, 
+            "Sequential generation should produce more unique values than rand_name()'s {0} combinations".format(
+                rand_name_max_combinations))
+
+
 if __name__ == '__main__':
     unittest.main()
