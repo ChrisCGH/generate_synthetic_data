@@ -228,12 +228,18 @@ class FastSyntheticGenerator:
                 if pkcols:
                     self. used_pk_values[key] = set()
                 
-                # Debug log UNIQUE constraints
+                # Debug log UNIQUE constraints - distinguish single vs composite
                 if unique_cons:
-                    unique_cols = set()
+                    single_unique_cols = set()
+                    composite_unique_cols = set()
                     for uc in unique_cons:
-                        unique_cols.update(uc.columns)
-                    debug_print("{0}: UNIQUE columns: {1}".format(key, unique_cols))
+                        if len(uc.columns) == 1:
+                            single_unique_cols.add(uc.columns[0])
+                        else:
+                            composite_unique_cols.update(uc.columns)
+                    debug_print("{0}: Single-column UNIQUE: {1}".format(key, single_unique_cols))
+                    if composite_unique_cols:
+                        debug_print("{0}: Composite UNIQUE columns: {1}".format(key, composite_unique_cols))
                 
                 cfg = self.table_map.get(key, {})
                 num_rows = cfg.get("rows") or self.default_rows_per_table
@@ -383,16 +389,17 @@ class FastSyntheticGenerator:
         
         single_unique_cols = set()
         composite_unique_constraints = []
+        composite_unique_cols = set()  # Track columns in composite UNIQUE constraints separately
         
         for uc in unique_constraints:
             if len(uc.columns) == 1:
                 single_unique_cols.add(uc.columns[0])
             else:
                 composite_unique_constraints.append(uc)
+                composite_unique_cols.update(uc.columns)
         
         all_unique_cols = set(single_unique_cols)
-        for uc in composite_unique_constraints:
-            all_unique_cols.update(uc.columns)
+        all_unique_cols.update(composite_unique_cols)
         
         local_trackers = {uc.constraint_name: set() for uc in unique_constraints}
         
@@ -472,7 +479,8 @@ class FastSyntheticGenerator:
                     base_value = generate_value_with_config(thread_rng, col, col_config)
                     
                     # Handle unique constraint for string types with extended config
-                    if is_in_unique and dtype in ("varchar", "char", "text", "mediumtext", "longtext") and base_value is not None:
+                    # Only append suffix for single-column UNIQUE, not composite UNIQUE
+                    if cname in single_unique_cols and dtype in ("varchar", "char", "text", "mediumtext", "longtext") and base_value is not None:
                         maxlen = int(col.char_max_length) if col.char_max_length else 255
                         base_str = str(base_value)
                         suffix = "_{0}".format(batch_idx)
@@ -488,7 +496,8 @@ class FastSyntheticGenerator:
                 
                 # Default value generation (unchanged from original logic)
                 if "int" in dtype or dtype in ("bigint", "smallint", "mediumint", "tinyint"):
-                    if is_in_unique:
+                    # Only use batch_idx for single-column UNIQUE, not composite UNIQUE
+                    if cname in single_unique_cols:
                         row[cname] = batch_idx
                         continue
                     else:
@@ -508,7 +517,8 @@ class FastSyntheticGenerator:
                         maxlen = int(col.char_max_length) if col.char_max_length else 24
                         base_value = rand_string(thread_rng, min(maxlen, 24))
                     
-                    if is_in_unique and base_value is not None:
+                    # Only append suffix for single-column UNIQUE, not composite UNIQUE
+                    if cname in single_unique_cols and base_value is not None:
                         maxlen = int(col.char_max_length) if col.char_max_length else 255
                         base_str = str(base_value)
                         suffix = "_{0}".format(batch_idx)
