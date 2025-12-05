@@ -436,6 +436,76 @@ class TestGenerateValueWithConfig(unittest.TestCase):
         for _ in range(50):
             value = generate_value_with_config(self.rng, col, config)
             self.assertIn(value, [100, 200, 300])
+    
+    def test_generate_varchar_with_format(self):
+        """Test generating varchar value with format string"""
+        col = self._make_column("user_code", "varchar")
+        config = {"column": "user_code", "min": 1, "max": 100, "format": "User_{:08d}"}
+        
+        # Generate multiple values and ensure they're formatted correctly
+        for _ in range(50):
+            value = generate_value_with_config(self.rng, col, config)
+            self.assertIsInstance(value, str)
+            self.assertTrue(value.startswith("User_"))
+            # Should be zero-padded to 8 digits after prefix
+            self.assertEqual(len(value), len("User_") + 8)
+            # Extract the number part and verify it's in range
+            num_part = value[len("User_"):]
+            self.assertTrue(num_part.isdigit())
+            self.assertGreaterEqual(int(num_part), 1)
+            self.assertLessEqual(int(num_part), 100)
+    
+    def test_generate_varchar_with_hex_format(self):
+        """Test generating varchar value with hex format"""
+        col = self._make_column("hex_id", "varchar")
+        config = {"column": "hex_id", "min": 0, "max": 255, "format": "0x{:02x}"}
+        
+        for _ in range(50):
+            value = generate_value_with_config(self.rng, col, config)
+            self.assertIsInstance(value, str)
+            self.assertTrue(value.startswith("0x"))
+            # Should be valid hex
+            hex_part = value[2:]
+            self.assertEqual(len(hex_part), 2)
+    
+    def test_generate_varchar_with_format_no_padding(self):
+        """Test generating varchar value with format but no padding"""
+        col = self._make_column("code", "varchar")
+        config = {"column": "code", "min": 1, "max": 1000, "format": "CODE_{:d}"}
+        
+        for _ in range(50):
+            value = generate_value_with_config(self.rng, col, config)
+            self.assertIsInstance(value, str)
+            self.assertTrue(value.startswith("CODE_"))
+    
+    def test_generate_varchar_with_min_max_no_format(self):
+        """Test generating varchar value with min/max but no format (plain number as string)"""
+        col = self._make_column("code", "varchar")
+        config = {"column": "code", "min": 1, "max": 100}
+        
+        for _ in range(50):
+            value = generate_value_with_config(self.rng, col, config)
+            self.assertIsInstance(value, str)
+            # Should be a plain number string
+            self.assertTrue(value.isdigit())
+            self.assertGreaterEqual(int(value), 1)
+            self.assertLessEqual(int(value), 100)
+    
+    def test_generate_varchar_format_truncation(self):
+        """Test that formatted values are truncated to column max length"""
+        col = ColumnMeta(
+            name="short_code", data_type="varchar", is_nullable="YES",
+            column_type="varchar(10)", column_key="", extra="",
+            char_max_length=10, numeric_precision=None, numeric_scale=None,
+            column_default=None
+        )
+        config = {"column": "short_code", "min": 1, "max": 100, "format": "VeryLongPrefix_{:08d}"}
+        
+        for _ in range(50):
+            value = generate_value_with_config(self.rng, col, config)
+            self.assertIsInstance(value, str)
+            # Should be truncated to 10 chars
+            self.assertLessEqual(len(value), 10)
 
 
 class TestBackwardCompatibility(unittest.TestCase):

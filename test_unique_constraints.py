@@ -406,5 +406,110 @@ class TestCrossBatchUniqueness(unittest.TestCase):
         self.assertEqual(len(set(extracted_values)), 500)
 
 
+class TestFormatInUniqueValuePool(unittest.TestCase):
+    """Test format string support in generate_unique_value_pool"""
+    
+    def setUp(self):
+        self.rng = random.Random(42)
+    
+    def _make_column(self, name, data_type, **kwargs):
+        """Helper to create ColumnMeta"""
+        return ColumnMeta(
+            name=name, data_type=data_type, is_nullable="YES",
+            column_type=kwargs.get("column_type", data_type),
+            column_key="", extra="",
+            char_max_length=kwargs.get("char_max_length", 255),
+            numeric_precision=kwargs.get("numeric_precision", 10),
+            numeric_scale=kwargs.get("numeric_scale", 2),
+            column_default=None
+        )
+    
+    def test_varchar_with_format_unique_values(self):
+        """Test generating unique varchar values with format string"""
+        col = self._make_column("user_code", "varchar")
+        config = {"column": "user_code", "min": 1, "max": 1000, "format": "User_{:08d}"}
+        needed = 100
+        
+        pool = generate_unique_value_pool(col, config, needed, self.rng)
+        
+        # Should generate requested number of unique values
+        self.assertEqual(len(pool), needed)
+        # All values should be unique
+        self.assertEqual(len(set(pool)), needed)
+        # All values should be formatted strings
+        for val in pool:
+            self.assertIsInstance(val, str)
+            self.assertTrue(val.startswith("User_"))
+            self.assertEqual(len(val), len("User_") + 8)
+    
+    def test_varchar_with_format_hex(self):
+        """Test generating unique varchar values with hex format"""
+        col = self._make_column("hex_id", "varchar")
+        config = {"column": "hex_id", "min": 0, "max": 65535, "format": "0x{:04x}"}
+        needed = 100
+        
+        pool = generate_unique_value_pool(col, config, needed, self.rng)
+        
+        self.assertEqual(len(pool), needed)
+        self.assertEqual(len(set(pool)), needed)
+        for val in pool:
+            self.assertTrue(val.startswith("0x"))
+    
+    def test_varchar_with_min_max_no_format(self):
+        """Test generating unique varchar values with min/max but no format"""
+        col = self._make_column("code", "varchar")
+        config = {"column": "code", "min": 1, "max": 1000}
+        needed = 100
+        
+        pool = generate_unique_value_pool(col, config, needed, self.rng)
+        
+        self.assertEqual(len(pool), needed)
+        self.assertEqual(len(set(pool)), needed)
+        # All values should be plain number strings
+        for val in pool:
+            self.assertIsInstance(val, str)
+            self.assertTrue(val.isdigit())
+    
+    def test_varchar_format_with_insufficient_range(self):
+        """Test format with insufficient range produces warning but works"""
+        col = self._make_column("code", "varchar")
+        config = {"column": "code", "min": 1, "max": 5, "format": "ID_{:02d}"}
+        needed = 10
+        
+        pool = generate_unique_value_pool(col, config, needed, self.rng)
+        
+        # Should only get 5 values (range size)
+        self.assertEqual(len(pool), 5)
+        self.assertEqual(len(set(pool)), 5)
+        # All values should be formatted
+        for val in pool:
+            self.assertTrue(val.startswith("ID_"))
+    
+    def test_varchar_format_truncation_in_pool(self):
+        """Test that formatted values are truncated to column max length in pool"""
+        col = self._make_column("short_code", "varchar", char_max_length=10)
+        config = {"column": "short_code", "min": 1, "max": 100, "format": "VeryLongPrefix_{:08d}"}
+        needed = 50
+        
+        pool = generate_unique_value_pool(col, config, needed, self.rng)
+        
+        # All values should be truncated to max length
+        for val in pool:
+            self.assertLessEqual(len(val), 10)
+    
+    def test_varchar_large_range_with_format(self):
+        """Test large range with format uses sampling"""
+        col = self._make_column("big_code", "varchar")
+        config = {"column": "big_code", "min": 1, "max": 10000000, "format": "CODE_{:08d}"}
+        needed = 100
+        
+        pool = generate_unique_value_pool(col, config, needed, self.rng)
+        
+        self.assertEqual(len(pool), needed)
+        self.assertEqual(len(set(pool)), needed)
+        for val in pool:
+            self.assertTrue(val.startswith("CODE_"))
+
+
 if __name__ == '__main__':
     unittest.main()

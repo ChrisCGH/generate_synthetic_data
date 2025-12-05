@@ -92,6 +92,14 @@ def validate_populate_column_config(col_meta, config):
                     col_meta.name, min_val, max_val), file=sys.stderr)
                 return False
         
+        # String type with min/max: validate format string if provided
+        if dtype in ("varchar", "char", "text", "mediumtext", "longtext"):
+            if "format" in config:
+                format_str = config["format"]
+                if "{" not in format_str or "}" not in format_str:
+                    print("WARNING: format string '{0}' for column {1} has no placeholders".format(
+                        format_str, col_meta.name), file=sys.stderr)
+        
         # Date validation
         if dtype in ("date", "datetime", "timestamp"):
             min_date = parse_date(str(min_val))
@@ -180,7 +188,7 @@ def generate_value_with_config(rng, col, config=None):
     Args:
         rng: Random number generator
         col: ColumnMeta object
-        config: Optional dict with 'min', 'max', or 'values' keys
+        config: Optional dict with 'min', 'max', 'values', or 'format' keys
     
     Returns: Generated value appropriate for the column type
     """
@@ -242,6 +250,27 @@ def generate_value_with_config(rng, col, config=None):
     
     # Handle string types
     elif dtype in ("varchar", "char", "text", "mediumtext", "longtext"):
+        # Check if min/max range is provided with optional format
+        if has_range:
+            base_value = rng.randint(int(min_val), int(max_val))
+            
+            # Apply format if provided
+            if "format" in config:
+                format_str = config["format"]
+                try:
+                    formatted_value = format_str.format(base_value)
+                    # Truncate to column max length
+                    maxlen = int(col.char_max_length) if col.char_max_length else 255
+                    return formatted_value[:maxlen]
+                except (ValueError, KeyError, IndexError) as e:
+                    # If format fails, fall back to plain value
+                    print("WARNING: Format string '{0}' failed for column {1}: {2}. Using plain value.".format(
+                        format_str, col.name, e), file=sys.stderr)
+                    return str(base_value)
+            
+            # No format specified, return as string
+            return str(base_value)
+        
         lname = col.name.lower()
         if "email" in lname:
             return rand_email(rng)
@@ -346,7 +375,7 @@ def generate_unique_value_pool(col_meta, config, needed_count, rng):
     
     Args:
         col_meta: ColumnMeta object
-        config: populate_columns configuration dict with 'min'/'max' or 'values'
+        config: populate_columns configuration dict with 'min'/'max', 'values', or 'format'
         needed_count: number of unique values needed
         rng: random number generator
     
@@ -422,9 +451,56 @@ def generate_unique_value_pool(col_meta, config, needed_count, rng):
         return pool
     
     elif dtype in ("varchar", "char", "text", "mediumtext", "longtext"):
-        # For strings with values, this is handled above
-        # For strings without values (just min/max which doesn't apply), fall through
-        # Generate random strings with guaranteed uniqueness
+        # Check if min/max range is provided with optional format
+        min_val = config.get("min")
+        max_val = config.get("max")
+        
+        if min_val is not None and max_val is not None:
+            range_size = int(max_val) - int(min_val) + 1
+            if range_size < needed_count:
+                print("WARNING: Column {0} range [{1}, {2}] has only {3} values but {4} rows requested".format(
+                    col_meta.name, min_val, max_val, range_size, needed_count), file=sys.stderr)
+            
+            # For large ranges, sample instead of generating all
+            if range_size > needed_count * 2 and range_size > 100000:
+                # Random sampling for large ranges
+                unique_values = set()
+                max_attempts = needed_count * 10
+                attempts = 0
+                while len(unique_values) < needed_count and attempts < max_attempts:
+                    val = rng.randint(int(min_val), int(max_val))
+                    unique_values.add(val)
+                    attempts += 1
+                all_values = list(unique_values)
+            else:
+                # Generate all possible values in range and shuffle
+                all_values = list(range(int(min_val), int(max_val) + 1))
+                rng.shuffle(all_values)
+                all_values = all_values[:needed_count]
+            
+            # Apply format if specified
+            if "format" in config:
+                format_str = config["format"]
+                maxlen = int(col_meta.char_max_length) if col_meta.char_max_length else 255
+                
+                formatted_values = []
+                for val in all_values:
+                    try:
+                        formatted = format_str.format(val)
+                        formatted_values.append(formatted[:maxlen])
+                    except (ValueError, KeyError, IndexError):
+                        # Fallback to plain value if format fails
+                        formatted_values.append(str(val))
+                
+                rng.shuffle(formatted_values)
+                return formatted_values
+            
+            # No format specified, return as strings
+            pool = [str(val) for val in all_values]
+            rng.shuffle(pool)
+            return pool
+        
+        # For strings without values or min/max, generate random strings with guaranteed uniqueness
         unique_values = set()
         max_length = col_meta.char_max_length or 20
         # Use actual max length, but cap at reasonable value for performance
