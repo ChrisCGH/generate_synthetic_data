@@ -1363,13 +1363,35 @@ class FastSyntheticGenerator:
                 if pre_allocated_pk_tuples and fk_col in pk_fk_columns:
                     continue
                 
+                # Skip if FK value was already assigned (e.g., by populate_columns with explicit values)
+                if temp_row.get(fk_col) is not None:
+                    continue
+                
+                # Populate FK from parent values (works for both nullable and NOT NULL columns)
                 col_meta = next((c for c in tmeta.columns if c.name == fk_col), None)
-                if col_meta and col_meta.is_nullable == "NO":
-                    if pre_allocated_pk and fk_col in pk_fk_columns:
-                        temp_row[fk_col] = pre_allocated_pk[row_idx]
-                    else:
-                        parent_vals = parent_caches.get(fk_col, [])
-                        temp_row[fk_col] = self.rng.choice(parent_vals) if parent_vals else None
+                if col_meta:
+                    # Check fk_population_rate for this column
+                    fk_pop_rates = self.fk_population_rates.get(node, {})
+                    population_rate = fk_pop_rates.get(fk_col, 1.0)  # Default 100% population
+                    
+                    # Respect fk_population_rate: for nullable columns, only populate some rows
+                    should_populate = True
+                    if col_meta.is_nullable == "YES" and population_rate < 1.0:
+                        should_populate = (self.rng.random() < population_rate)
+                    
+                    if should_populate:
+                        if pre_allocated_pk and fk_col in pk_fk_columns:
+                            temp_row[fk_col] = pre_allocated_pk[row_idx]
+                        else:
+                            parent_vals = parent_caches.get(fk_col, [])
+                            if parent_vals:
+                                temp_row[fk_col] = self.rng.choice(parent_vals)
+                            else:
+                                # No parent values available
+                                if col_meta.is_nullable == "NO":
+                                    # NOT NULL FK with no parent data - this is a warning
+                                    debug_print("{0}: WARNING - NOT NULL FK column {1} has no parent values available".format(
+                                        node, fk_col))
             
             resolved_rows.append(temp_row)
         
