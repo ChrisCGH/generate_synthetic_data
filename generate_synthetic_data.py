@@ -1371,6 +1371,9 @@ class FastSyntheticGenerator:
                 col_meta = next((c for c in tmeta.columns if c.name == fk_col), None)
                 if col_meta:
                     # Check fk_population_rate for this column
+                    # Default to 100% population for FKs - even nullable FKs should reference
+                    # valid parent rows to maintain referential integrity. Use fk_population_rate
+                    # config to specify a lower percentage if NULL values are desired.
                     fk_pop_rates = self.fk_population_rates.get(node, {})
                     population_rate = fk_pop_rates.get(fk_col, 1.0)  # Default 100% population
                     
@@ -1389,8 +1392,8 @@ class FastSyntheticGenerator:
                             else:
                                 # No parent values available
                                 if col_meta.is_nullable == "NO":
-                                    # NOT NULL FK with no parent data - this is a warning
-                                    debug_print("{0}: WARNING - NOT NULL FK column {1} has no parent values available".format(
+                                    # NOT NULL FK with no parent data - this will cause constraint violations
+                                    debug_print("{0}: WARNING - NOT NULL FK column {1} has no parent values available and will remain NULL, which may cause constraint violations".format(
                                         node, fk_col))
             
             resolved_rows.append(temp_row)
