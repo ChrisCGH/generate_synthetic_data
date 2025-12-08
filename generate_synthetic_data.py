@@ -1176,12 +1176,79 @@ class FastSyntheticGenerator:
             
             # If we have composite UNIQUE constraints with all controlled columns, use Cartesian product
             if unique_fk_constraints:
-                # Use the first such constraint (usually there's only one)
-                uc = unique_fk_constraints[0]
-                
+                # If multiple constraints found, choose the one with fewest combinations (tightest constraint)
                 if len(unique_fk_constraints) > 1:
-                    debug_print("{0}: Multiple composite UNIQUE constraints with all controlled columns found. Using: {1}".format(
-                        node, uc.constraint_name))
+                    # Calculate total combinations for each constraint
+                    constraint_combos = []
+                    
+                    for candidate_uc in unique_fk_constraints:
+                        combo_count = 1
+                        
+                        for col_name in candidate_uc.columns:
+                            # Check if FK column
+                            if col_name in fk_map:
+                                fk = fk_map[col_name]
+                                parent_node = "{0}.{1}".format(fk.referenced_table_schema, fk.referenced_table_name)
+                                
+                                if parent_node in self.generated_rows:
+                                    parent_rows = self.generated_rows[parent_node]
+                                    parent_col = fk.referenced_column_name
+                                    parent_vals = [r.get(parent_col) for r in parent_rows if r and r.get(parent_col) is not None]
+                                    unique_vals = len(set(parent_vals))
+                                    combo_count *= unique_vals
+                                else:
+                                    # Parent not generated yet - can't calculate, mark as unknown (infinity)
+                                    combo_count = float('inf')
+                                    break
+                            else:
+                                # Non-FK column with explicit config
+                                populate_config = self.populate_columns_config.get(node, {})
+                                col_config = populate_config.get(col_name, {})
+                                
+                                if "values" in col_config:
+                                    combo_count *= len(col_config["values"])
+                                elif "min" in col_config:
+                                    # Estimate range size
+                                    min_val = col_config.get("min", 0)
+                                    max_val = col_config.get("max", 100)
+                                    combo_count *= (max_val - min_val + 1)
+                                else:
+                                    # Can't determine size
+                                    combo_count = float('inf')
+                                    break
+                        
+                        constraint_combos.append((candidate_uc, combo_count))
+                    
+                    # Sort by combo count (ascending) and pick the tightest constraint
+                    constraint_combos.sort(key=lambda x: x[1])
+                    uc, min_combos = constraint_combos[0]
+                    
+                    # Log which constraint was chosen and why
+                    debug_print("{0}: Multiple composite UNIQUE constraints found:".format(node))
+                    for candidate_uc, combo_count in constraint_combos:
+                        marker = "✓ SELECTED" if candidate_uc == uc else ""
+                        if combo_count == float('inf'):
+                            debug_print("  - {0} {1}: unknown combinations {2}".format(candidate_uc.constraint_name, candidate_uc.columns, marker))
+                        else:
+                            debug_print("  - {0} {1}: {2} combinations {3}".format(candidate_uc.constraint_name, candidate_uc.columns, combo_count, marker))
+                    
+                    debug_print("{0}: Selected tightest constraint: {1} with {2} combinations".format(
+                        node, uc.constraint_name, min_combos if min_combos != float('inf') else 'unknown'))
+                    
+                    # Warn about other constraints
+                    other_constraints = [c.constraint_name for c, _ in constraint_combos if c != uc]
+                    if other_constraints:
+                        combos_str = min_combos if min_combos != float('inf') else 'unknown'
+                        print(
+                            "WARNING: {0}: Multiple UNIQUE constraints detected. Using Cartesian product for {1} "
+                            "({2} combinations). Other constraints ({3}) may have duplicates.".format(
+                                node, uc.constraint_name, combos_str, ', '.join(other_constraints)
+                            ),
+                            file=sys.stderr
+                        )
+                else:
+                    # Only one constraint - use it
+                    uc = unique_fk_constraints[0]
                 
                 debug_print("{0}: Composite UNIQUE {1} has all controlled columns: {2}. Using Cartesian product.".format(
                     node, uc.constraint_name, uc.columns))
