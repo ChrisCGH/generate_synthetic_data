@@ -1238,16 +1238,30 @@ class FastSyntheticGenerator:
                 debug_print("{0}: Rows per shared value combination: {1}".format(node, rows_per_shared_combo))
                 
                 # Load values for shared columns
-                primary_shared_col = list(shared_cols)[0]
-                shared_values = []
-                if primary_shared_col in fk_map:
-                    fk = fk_map[primary_shared_col]
-                    parent_node = "{0}.{1}".format(fk.referenced_table_schema, fk.referenced_table_name)
-                    parent_col = fk.referenced_column_name
+                if not shared_cols:
+                    print("ERROR: {0}: No shared columns found among overlapping constraints".format(node), file=sys.stderr)
+                else:
+                    # Use sorted order for deterministic behavior
+                    primary_shared_col = sorted(list(shared_cols))[0]
+                    shared_values = []
                     
-                    if parent_node in self.generated_rows:
-                        parent_rows = self.generated_rows[parent_node]
-                        shared_values = list(set([r.get(parent_col) for r in parent_rows if r and r.get(parent_col) is not None]))
+                    if primary_shared_col in fk_map:
+                        fk = fk_map[primary_shared_col]
+                        parent_node = "{0}.{1}".format(fk.referenced_table_schema, fk.referenced_table_name)
+                        parent_col = fk.referenced_column_name
+                        
+                        if parent_node in self.generated_rows:
+                            parent_rows = self.generated_rows[parent_node]
+                            shared_values = list(set([r.get(parent_col) for r in parent_rows if r and r.get(parent_col) is not None]))
+                    else:
+                        # Shared column has explicit config values
+                        populate_config = self.populate_columns_config.get(node, {})
+                        col_config = populate_config.get(primary_shared_col, {})
+                        if "values" in col_config:
+                            shared_values = col_config["values"]
+                    
+                    if not shared_values:
+                        print("ERROR: {0}: No values found for shared column {1}".format(node, primary_shared_col), file=sys.stderr)
                 
                 # Generate row assignments
                 all_combinations = []
@@ -1269,14 +1283,21 @@ class FastSyntheticGenerator:
                                         parent_rows = self.generated_rows[parent_node]
                                         available_vals = list(set([r.get(parent_col) for r in parent_rows if r and r.get(parent_col) is not None]))
                                         
-                                        # Cycle through values
-                                        row_assignment[col_name] = available_vals[local_idx % len(available_vals)]
+                                        # Cycle through values (check for empty list)
+                                        if available_vals:
+                                            row_assignment[col_name] = available_vals[local_idx % len(available_vals)]
+                                        else:
+                                            print("ERROR: {0}: No values available for FK column {1}".format(node, col_name), file=sys.stderr)
                                 else:
                                     populate_config = self.populate_columns_config.get(node, {})
                                     col_config = populate_config.get(col_name, {})
                                     if "values" in col_config:
                                         available_vals = col_config["values"]
-                                        row_assignment[col_name] = available_vals[local_idx % len(available_vals)]
+                                        # Check for empty list
+                                        if available_vals:
+                                            row_assignment[col_name] = available_vals[local_idx % len(available_vals)]
+                                        else:
+                                            print("ERROR: {0}: No values available for column {1}".format(node, col_name), file=sys.stderr)
                         
                         all_combinations.append(row_assignment)
                 
