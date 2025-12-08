@@ -1155,52 +1155,105 @@ class FastSyntheticGenerator:
                 if len(uc.columns) < 2:
                     continue
                 
-                # Check if ALL columns in this UNIQUE constraint are FKs
-                all_fks = all(col in fk_map for col in uc.columns)
+                # Check if ALL columns in this UNIQUE constraint are "controlled"
+                # Controlled = FK column OR has explicit values/range in populate_columns
+                all_controlled = True
+                for col in uc.columns:
+                    is_fk = col in fk_map
+                    has_explicit_config = False
+                    
+                    if cfg:
+                        populate_config = self.populate_columns_config.get(node, {})
+                        col_config = populate_config.get(col, {})
+                        has_explicit_config = "values" in col_config or "min" in col_config
+                    
+                    if not (is_fk or has_explicit_config):
+                        all_controlled = False
+                        break
                 
-                if all_fks:
+                if all_controlled:
                     unique_fk_constraints.append(uc)
             
-            # If we have composite UNIQUE constraints with all FKs, use Cartesian product
+            # If we have composite UNIQUE constraints with all controlled columns, use Cartesian product
             if unique_fk_constraints:
                 # Use the first such constraint (usually there's only one)
                 uc = unique_fk_constraints[0]
                 
                 if len(unique_fk_constraints) > 1:
-                    debug_print("{0}: Multiple composite UNIQUE constraints with all FKs found. Using: {1}".format(
+                    debug_print("{0}: Multiple composite UNIQUE constraints with all controlled columns found. Using: {1}".format(
                         node, uc.constraint_name))
                 
-                debug_print("{0}: Composite UNIQUE {1} has all FK columns: {2}. Using Cartesian product.".format(
+                debug_print("{0}: Composite UNIQUE {1} has all controlled columns: {2}. Using Cartesian product.".format(
                     node, uc.constraint_name, uc.columns))
                 
-                # Load parent values for each FK column in the constraint
+                # Load values for each column in the constraint (FK or non-FK)
                 parent_value_lists = []
                 parent_col_names = []
                 all_parents_loaded = True
                 
                 for col_name in uc.columns:
-                    fk = fk_map[col_name]
-                    parent_node = "{0}.{1}".format(fk.referenced_table_schema, fk.referenced_table_name)
-                    parent_col = fk.referenced_column_name
-                    
-                    # Load parent values from generated_rows
-                    parent_vals = []
-                    if parent_node in self.generated_rows:
-                        parent_rows = self.generated_rows[parent_node]
-                        parent_vals = [r.get(parent_col) for r in parent_rows if r and r.get(parent_col) is not None]
-                        parent_vals = list(set(parent_vals))  # Get unique values
-                    
-                    if not parent_vals:
-                        print("ERROR: No parent values found for FK {0} -> {1}.{2}".format(
-                            col_name, parent_node, parent_col), file=sys.stderr)
-                        all_parents_loaded = False
-                        break
-                    
-                    debug_print("{0}: Loaded {1} parent values for {2} from {3}.{4}".format(
-                        node, len(parent_vals), col_name, parent_node, parent_col))
-                    
-                    parent_value_lists.append(parent_vals)
-                    parent_col_names.append(col_name)
+                    # Check if this is an FK column
+                    if col_name in fk_map:
+                        # FK column - load parent values from generated_rows
+                        fk = fk_map[col_name]
+                        parent_node = "{0}.{1}".format(fk.referenced_table_schema, fk.referenced_table_name)
+                        parent_col = fk.referenced_column_name
+                        
+                        # Load parent values from generated_rows
+                        parent_vals = []
+                        if parent_node in self.generated_rows:
+                            parent_rows = self.generated_rows[parent_node]
+                            parent_vals = [r.get(parent_col) for r in parent_rows if r and r.get(parent_col) is not None]
+                            parent_vals = list(set(parent_vals))  # Get unique values
+                        
+                        if not parent_vals:
+                            print("ERROR: No parent values found for FK {0} -> {1}.{2}".format(
+                                col_name, parent_node, parent_col), file=sys.stderr)
+                            all_parents_loaded = False
+                            break
+                        
+                        debug_print("{0}: Loaded {1} parent values for {2} from {3}.{4}".format(
+                            node, len(parent_vals), col_name, parent_node, parent_col))
+                        
+                        parent_value_lists.append(parent_vals)
+                        parent_col_names.append(col_name)
+                    else:
+                        # Non-FK column - get values from populate_columns config
+                        populate_config = self.populate_columns_config.get(node, {})
+                        col_config = populate_config.get(col_name, {})
+                        
+                        if "values" in col_config:
+                            # Explicit values array
+                            col_vals = col_config["values"]
+                            debug_print("{0}: Using {1} explicit values for non-FK column {2}: {3}".format(
+                                node, len(col_vals), col_name, col_vals))
+                            parent_value_lists.append(col_vals)
+                            parent_col_names.append(col_name)
+                        elif "min" in col_config:
+                            # Generate range of values
+                            col_meta = next((c for c in tmeta.columns if c.name == col_name), None)
+                            if col_meta:
+                                # Estimate number of unique values needed based on other columns
+                                # This is conservative - generate enough values to support requested rows
+                                estimated_needed = len(rows)
+                                
+                                # Generate unique value pool using existing logic
+                                from generate_synthetic_data_utils import generate_unique_value_pool
+                                col_vals = generate_unique_value_pool(col_meta, col_config, estimated_needed, self.rng)
+                                
+                                debug_print("{0}: Generated {1} unique values for non-FK column {2} from range".format(
+                                    node, len(col_vals), col_name))
+                                parent_value_lists.append(col_vals)
+                                parent_col_names.append(col_name)
+                            else:
+                                print("ERROR: Column metadata not found for non-FK column {0}".format(col_name), file=sys.stderr)
+                                all_parents_loaded = False
+                                break
+                        else:
+                            print("ERROR: Non-FK column {0} in UNIQUE constraint has no values or min/max config".format(
+                                col_name), file=sys.stderr)
+                            all_parents_loaded = False
+                            break
                 
                 # Only proceed if we have all parent values
                 if all_parents_loaded and len(parent_value_lists) == len(uc.columns):
