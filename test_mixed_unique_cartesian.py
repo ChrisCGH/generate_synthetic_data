@@ -17,22 +17,17 @@ from generate_synthetic_data_utils import (
 class TestMixedUniqueDetection(unittest.TestCase):
     """Test detection of composite UNIQUE constraints with mixed FK/non-FK columns."""
     
-    def test_detect_mixed_fk_with_explicit_values(self):
-        """Test that UNIQUE constraints with FK + non-FK (explicit values) are detected."""
-        unique_constraints = [
-            UniqueConstraint("unique_a_pr", ("A_ID", "PR")),  # A_ID is FK, PR has explicit values
-        ]
+    def _detect_controlled_constraints(self, unique_constraints, fk_map, populate_config):
+        """Helper method to detect controlled constraints.
         
-        fk_map = {
-            "A_ID": FKMeta("fk_a", "db", "AC", "A_ID", "db", "A", "ID", False, None),
-        }
-        
-        # Simulate populate_columns config
-        populate_config = {
-            "PR": {"column": "PR", "values": [0, 1]}
-        }
-        
-        # Check if all columns are "controlled"
+        Args:
+            unique_constraints: List of UniqueConstraint objects
+            fk_map: Dictionary mapping column names to FKMeta objects
+            populate_config: Dictionary mapping column names to config objects
+            
+        Returns:
+            List of controlled unique constraints
+        """
         unique_controlled_constraints = []
         for uc in unique_constraints:
             if len(uc.columns) < 2:
@@ -52,6 +47,27 @@ class TestMixedUniqueDetection(unittest.TestCase):
             
             if all_controlled:
                 unique_controlled_constraints.append(uc)
+        
+        return unique_controlled_constraints
+    
+    def test_detect_mixed_fk_with_explicit_values(self):
+        """Test that UNIQUE constraints with FK + non-FK (explicit values) are detected."""
+        unique_constraints = [
+            UniqueConstraint("unique_a_pr", ("A_ID", "PR")),  # A_ID is FK, PR has explicit values
+        ]
+        
+        fk_map = {
+            "A_ID": FKMeta("fk_a", "db", "AC", "A_ID", "db", "A", "ID", False, None),
+        }
+        
+        # Simulate populate_columns config
+        populate_config = {
+            "PR": {"column": "PR", "values": [0, 1]}
+        }
+        
+        unique_controlled_constraints = self._detect_controlled_constraints(
+            unique_constraints, fk_map, populate_config
+        )
         
         # Should detect the mixed constraint
         self.assertEqual(len(unique_controlled_constraints), 1)
@@ -71,25 +87,9 @@ class TestMixedUniqueDetection(unittest.TestCase):
             "score": {"column": "score", "min": 0, "max": 100}
         }
         
-        unique_controlled_constraints = []
-        for uc in unique_constraints:
-            if len(uc.columns) < 2:
-                continue
-            
-            all_controlled = True
-            for col in uc.columns:
-                is_fk = col in fk_map
-                has_explicit_config = False
-                
-                col_config = populate_config.get(col, {})
-                has_explicit_config = "values" in col_config or "min" in col_config
-                
-                if not (is_fk or has_explicit_config):
-                    all_controlled = False
-                    break
-            
-            if all_controlled:
-                unique_controlled_constraints.append(uc)
+        unique_controlled_constraints = self._detect_controlled_constraints(
+            unique_constraints, fk_map, populate_config
+        )
         
         # Should detect the mixed constraint
         self.assertEqual(len(unique_controlled_constraints), 1)
@@ -107,25 +107,9 @@ class TestMixedUniqueDetection(unittest.TestCase):
         
         populate_config = {}  # No config for unconfigured_col
         
-        unique_controlled_constraints = []
-        for uc in unique_constraints:
-            if len(uc.columns) < 2:
-                continue
-            
-            all_controlled = True
-            for col in uc.columns:
-                is_fk = col in fk_map
-                has_explicit_config = False
-                
-                col_config = populate_config.get(col, {})
-                has_explicit_config = "values" in col_config or "min" in col_config
-                
-                if not (is_fk or has_explicit_config):
-                    all_controlled = False
-                    break
-            
-            if all_controlled:
-                unique_controlled_constraints.append(uc)
+        unique_controlled_constraints = self._detect_controlled_constraints(
+            unique_constraints, fk_map, populate_config
+        )
         
         # Should NOT detect constraint with unconfigured column
         self.assertEqual(len(unique_controlled_constraints), 0)
@@ -143,25 +127,9 @@ class TestMixedUniqueDetection(unittest.TestCase):
             "y": {"column": "y", "values": ["a", "b", "c"]}
         }
         
-        unique_controlled_constraints = []
-        for uc in unique_constraints:
-            if len(uc.columns) < 2:
-                continue
-            
-            all_controlled = True
-            for col in uc.columns:
-                is_fk = col in fk_map
-                has_explicit_config = False
-                
-                col_config = populate_config.get(col, {})
-                has_explicit_config = "values" in col_config or "min" in col_config
-                
-                if not (is_fk or has_explicit_config):
-                    all_controlled = False
-                    break
-            
-            if all_controlled:
-                unique_controlled_constraints.append(uc)
+        unique_controlled_constraints = self._detect_controlled_constraints(
+            unique_constraints, fk_map, populate_config
+        )
         
         # Should detect constraint with all configured non-FK columns
         self.assertEqual(len(unique_controlled_constraints), 1)
@@ -182,25 +150,9 @@ class TestMixedUniqueDetection(unittest.TestCase):
             "status": {"column": "status", "values": ["active", "inactive"]}
         }
         
-        unique_controlled_constraints = []
-        for uc in unique_constraints:
-            if len(uc.columns) < 2:
-                continue
-            
-            all_controlled = True
-            for col in uc.columns:
-                is_fk = col in fk_map
-                has_explicit_config = False
-                
-                col_config = populate_config.get(col, {})
-                has_explicit_config = "values" in col_config or "min" in col_config
-                
-                if not (is_fk or has_explicit_config):
-                    all_controlled = False
-                    break
-            
-            if all_controlled:
-                unique_controlled_constraints.append(uc)
+        unique_controlled_constraints = self._detect_controlled_constraints(
+            unique_constraints, fk_map, populate_config
+        )
         
         # Should detect three-column mixed constraint
         self.assertEqual(len(unique_controlled_constraints), 1)
