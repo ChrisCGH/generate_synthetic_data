@@ -390,6 +390,18 @@ class FastSyntheticGenerator:
         # Get extended populate_columns configuration
         populate_config = self.populate_columns_config.get(table_key, {})
         
+        # Identify discriminator columns used in conditional FK conditions
+        # These columns determine which FK to use, so they need values before FK resolution
+        discriminator_cols = set()
+        for fk in self.fks:
+            if "{0}.{1}".format(fk.table_schema, fk.table_name) == node and fk.condition:
+                parsed = parse_fk_condition(fk.condition)
+                if parsed:
+                    discriminator_cols.add(parsed['column'])
+        
+        if discriminator_cols:
+            debug_print("{0}: Conditional FK discriminator columns: {1}".format(node, discriminator_cols))
+        
         unique_constraints = self.unique_constraints.get(table_key, [])
         
         single_unique_cols = set()
@@ -440,6 +452,13 @@ class FastSyntheticGenerator:
                 is_fk = col_name in fk_cols
                 is_pk = col_name in tmeta.pk_columns
                 
+                # NEW: Discriminator columns with ENUM type are controlled
+                # (they'll get enum values from schema automatically)
+                if col_name in discriminator_cols:
+                    col_meta = next((c for c in tmeta.columns if c.name == col_name), None)
+                    if col_meta and col_meta.data_type and col_meta.data_type.lower() == "enum":
+                        is_controlled = True
+                
                 if is_controlled or is_fk or is_pk:
                     controlled_cols_in_constraint.append(col_name)
                 else:
@@ -479,8 +498,12 @@ class FastSyntheticGenerator:
                         continue
                 
                 if cname in fk_cols:
-                    row[cname] = None
-                    continue
+                    # Discriminator columns for conditional FKs need values before FK resolution
+                    # Don't skip them here if they're discriminators
+                    if cname not in discriminator_cols:
+                        row[cname] = None
+                        continue
+                    # else: fall through to generate value below
                 
                 dtype = (col.data_type or "").lower()
                 
